@@ -7,12 +7,10 @@ const COOKIE_PATH = "/tmp/supplier1-cookies.json";
    UTILITAIRES
 ========================= */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 const humanDelay = async (min = 600, max = 1400) => {
   const t = Math.floor(min + Math.random() * (max - min));
   await sleep(t);
 };
-
 const gotoStable = async (page, url) => {
   await page.goto(url, { waitUntil: "domcontentloaded" });
   await humanDelay();
@@ -43,27 +41,15 @@ async function dumpDebug(page, tag) {
   }
 
   const frames = page.frames().map((f) => f.url());
-
   console.log("DEBUG url:", url);
   console.log("DEBUG title:", title);
   console.log("DEBUG frames:", frames);
   console.log("DEBUG html snippet:", html.slice(0, 2500));
-
-  const lower = html.toLowerCase();
-  const hints = [];
-  if (lower.includes("cloudflare")) hints.push("cloudflare");
-  if (lower.includes("captcha")) hints.push("captcha");
-  if (lower.includes("access denied")) hints.push("access_denied");
-  if (lower.includes("forbidden")) hints.push("forbidden");
-  if (lower.includes("robot")) hints.push("robot_check");
-  if (hints.length) console.log("DEBUG hints:", hints.join(", "));
 }
 
 /* =========================
    HELPERS DOM (PAGE/FRAME)
 ========================= */
-
-// Cherche un selector sur page ou frames
 async function findSelectorInPageOrFrames(page, selector) {
   try {
     const h = await page.$(selector);
@@ -79,7 +65,6 @@ async function findSelectorInPageOrFrames(page, selector) {
   return null;
 }
 
-// Remplit un input via JS + events (page OU frame)
 async function setInputValueInContext(ctx, selector, value) {
   await ctx.waitForSelector(selector, { timeout: 20000 });
 
@@ -99,14 +84,12 @@ async function setInputValueInContext(ctx, selector, value) {
   if (!ok) throw new Error(`Cannot set value for input: ${selector}`);
 }
 
-// Soumet le form qui contient l’input (page OU frame)
 async function submitFormOfInputInContext(ctx, inputSelector) {
   await ctx.waitForSelector(inputSelector, { timeout: 20000 });
 
   const ok = await ctx.evaluate((sel) => {
     const input = document.querySelector(sel);
     if (!input) return false;
-
     const form = input.closest("form");
     if (!form) return false;
 
@@ -121,7 +104,6 @@ async function submitFormOfInputInContext(ctx, inputSelector) {
       form.submit();
       return true;
     }
-
     return false;
   }, inputSelector);
 
@@ -129,36 +111,8 @@ async function submitFormOfInputInContext(ctx, inputSelector) {
 }
 
 /* =========================
-   COOKIES
-========================= */
-async function launchBrowser() {
-  return puppeteer.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  });
-}
-
-async function loadCookies(page) {
-  if (fs.existsSync(COOKIE_PATH)) {
-    const cookies = JSON.parse(fs.readFileSync(COOKIE_PATH, "utf8"));
-    if (Array.isArray(cookies) && cookies.length) {
-      await page.setCookie(...cookies);
-      return true;
-    }
-  }
-  return false;
-}
-
-async function saveCookies(page) {
-  const cookies = await page.cookies();
-  fs.writeFileSync(COOKIE_PATH, JSON.stringify(cookies, null, 2));
-}
-
-/* =========================
    LOGIN AUTO-DETECT
 ========================= */
-
-// Trouve automatiquement les champs login/password visibles sur la page
 async function findLoginSelectors(page) {
   const result = await page.evaluate(() => {
     const isVisible = (el) => {
@@ -168,7 +122,6 @@ async function findLoginSelectors(page) {
     };
 
     const inputs = Array.from(document.querySelectorAll("input")).filter(isVisible);
-
     const password = inputs.find((i) => (i.getAttribute("type") || "").toLowerCase() === "password");
     const textCandidates = inputs.filter((i) => {
       const type = (i.getAttribute("type") || "text").toLowerCase();
@@ -177,7 +130,6 @@ async function findLoginSelectors(page) {
 
     const pick = (el) => {
       if (!el) return null;
-      // fabrique un selector robuste
       const id = el.getAttribute("id");
       const name = el.getAttribute("name");
       if (id) return `#${CSS.escape(id)}`;
@@ -188,7 +140,6 @@ async function findLoginSelectors(page) {
     return {
       userSel: pick(textCandidates[0] || null),
       passSel: pick(password || null),
-      // infos debug utiles
       allInputNames: inputs.map((i) => ({
         type: i.getAttribute("type") || "",
         name: i.getAttribute("name") || "",
@@ -203,7 +154,6 @@ async function findLoginSelectors(page) {
   if (!result.userSel || !result.passSel) {
     throw new Error("Could not auto-detect login fields (user/password)");
   }
-
   return { userSel: result.userSel, passSel: result.passSel };
 }
 
@@ -218,7 +168,6 @@ async function loginIfNeeded(page) {
 
   await gotoStable(page, loginUrl);
 
-  // Si déjà connecté, il est possible qu'il n'y ait aucun password visible
   const hasPassword = await page.$('input[type="password"]');
   if (!hasPassword) {
     console.log("Supplier1: already logged-in (no password field)");
@@ -226,7 +175,6 @@ async function loginIfNeeded(page) {
   }
 
   console.log("Supplier1: performing login (auto-detect)");
-
   const { userSel, passSel } = await findLoginSelectors(page);
 
   await humanDelay();
@@ -237,7 +185,6 @@ async function loginIfNeeded(page) {
 
   await humanDelay();
 
-  // Soumet le formulaire du password (le plus fiable)
   await Promise.allSettled([
     submitFormOfInputInContext(page, passSel),
     page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }),
@@ -245,31 +192,81 @@ async function loginIfNeeded(page) {
 
   await humanDelay(1200, 2200);
 
-  // Si on voit encore un password, login probablement échoué
   const stillPassword = await page.$('input[type="password"]');
   if (stillPassword) {
-    console.log("Supplier1: login might have failed (still on login page)");
     await dumpDebug(page, "login_failed");
     throw new Error("Login failed or still on login page");
   }
 
-  await saveCookies(page);
+  // cookies
+  const cookies = await page.cookies();
+  fs.writeFileSync(COOKIE_PATH, JSON.stringify(cookies, null, 2));
   console.log("Supplier1: login OK");
 }
 
 /* =========================
-   PLAQUE (immat)
+   PLAQUE + MODELE
 ========================= */
 const IMM_SEL = "input[name='immat']";
 
-async function enterPlate(page, plate) {
-  // Après login, si tu as une URL menu fixe, mets SUP_URL_MENU.
-  if (process.env.SUP_URL_MENU) {
-    await gotoStable(page, process.env.SUP_URL_MENU);
-  } else {
-    await humanDelay();
+// Choix modèle “auto” : select ou liste de liens/boutons
+async function pickFirstModelIfPresent(page) {
+  // petit délai pour laisser l’UI afficher les modèles
+  await humanDelay(800, 1600);
+
+  const picked = await page.evaluate(() => {
+    // 1) Cas <select>
+    const selects = Array.from(document.querySelectorAll("select"))
+      .filter((s) => s.options && s.options.length > 1);
+
+    if (selects.length) {
+      const sel = selects[0];
+      sel.selectedIndex = 1; // 1er choix réel (index 0 souvent placeholder)
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+
+      // cherche un submit dans le même form
+      const form = sel.closest("form");
+      const btn = form?.querySelector("button[type='submit'], input[type='submit']");
+      if (btn) btn.click();
+
+      return { ok: true, mode: "select", label: sel.options[sel.selectedIndex]?.textContent?.trim() || "" };
+    }
+
+    // 2) Cas liste de liens/boutons “choisir”
+    const candidates = Array.from(document.querySelectorAll("a,button,input[type='button'],input[type='submit']"));
+    const pick = candidates.find((el) => {
+      const txt = (el.textContent || "").toLowerCase();
+      const v = (el.value || "").toLowerCase();
+      return txt.includes("choisir") || txt.includes("sélection") || txt.includes("selection") || v.includes("choisir");
+    });
+
+    if (pick) {
+      pick.scrollIntoView({ block: "center" });
+      pick.click();
+      return { ok: true, mode: "button", label: (pick.textContent || pick.value || "").trim() };
+    }
+
+    // 3) rien trouvé
+    return { ok: false };
+  });
+
+  console.log("Supplier1: model pick =", picked);
+
+  if (picked && picked.ok) {
+    // navigation éventuelle
+    await Promise.race([
+      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }),
+      sleep(1500),
+    ]);
+    await humanDelay(800, 1600);
+    return true;
   }
 
+  // pas de modèle à choisir (soit il n’y en a qu’un, soit autre UI)
+  return false;
+}
+
+async function enterPlateAndMaybePickModel(page, plate) {
   console.log("Supplier1: URL before immat:", page.url());
 
   const found = await findSelectorInPageOrFrames(page, IMM_SEL);
@@ -292,6 +289,9 @@ async function enterPlate(page, plate) {
   ]);
 
   await humanDelay(1200, 2400);
+
+  // ✅ essai choix modèle
+  await pickFirstModelIfPresent(page);
 }
 
 /* =========================
@@ -301,19 +301,37 @@ async function supplier1Scrape(plate) {
   plate = (plate || "").toString().trim();
   if (!plate) throw new Error("Missing plate");
 
-  const browser = await launchBrowser();
-  const page = await browser.newPage();
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  });
 
+  const page = await browser.newPage();
   await page.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
   );
   await page.setViewport({ width: 1366, height: 768 });
 
-  await loadCookies(page);
+  // cookies
+  if (fs.existsSync(COOKIE_PATH)) {
+    try {
+      const cookies = JSON.parse(fs.readFileSync(COOKIE_PATH, "utf8"));
+      if (Array.isArray(cookies) && cookies.length) await page.setCookie(...cookies);
+    } catch (_) {}
+  }
 
   try {
     await loginIfNeeded(page);
-    await enterPlate(page, plate);
+
+    // après login, on arrive sur un écran de recherche plaque via l’app
+    // si tu as une URL menu fixe, mets SUP_URL_MENU ; sinon on reste sur l’état actuel
+    if (process.env.SUP_URL_MENU) {
+      await gotoStable(page, process.env.SUP_URL_MENU);
+    } else {
+      await humanDelay();
+    }
+
+    await enterPlateAndMaybePickModel(page, plate);
   } catch (e) {
     console.log("Supplier1 ERROR:", String(e?.message || e));
     await dumpDebug(page, "supplier1_error");
@@ -324,9 +342,10 @@ async function supplier1Scrape(plate) {
   const afterUrl = page.url();
   await browser.close();
 
+  // ✅ Validation : plaque OK + modèle peut-être choisi
   return [
     {
-      name: "SUP1_PLATE_OK",
+      name: "SUP1_MODEL_OK",
       price: 0,
       supplier: "Supplier1",
       url: afterUrl,
