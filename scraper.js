@@ -1,28 +1,14 @@
-const puppeteer = require("puppeteer");
-const send = require("./sendToHostinger");
+const sendToHostinger = require("./sendToHostinger");
 
-async function scrape(plate){
+async function scrape(plate) {
+  const parts = [
+    { name: "Plaquette frein", price: 49.9, supplier: "Test Supplier", url: "https://example.com" },
+  ];
 
- const browser = await puppeteer.launch({
-   headless:true,
-   args:["--no-sandbox"]
- });
+  // ✅ IMPORTANT: on envoie bien plate + parts
+  await sendToHostinger({ plate, parts });
 
- const page = await browser.newPage();
-
- await page.goto("https://example.com");
-
- const products = [{
-   name:"Plaquette frein",
-   price:49.90,
-   supplier:"Test Supplier"
- }];
-
- await browser.close();
-
- await send(products);
-
- return products;
+  return parts;
 }
 
 module.exports = scrape;
