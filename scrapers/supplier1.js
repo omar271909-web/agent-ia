@@ -40,35 +40,17 @@ async function dumpDebug(page, tag) {
     console.log("DEBUG html write failed:", String(e?.message || e));
   }
 
-  const frames = page.frames().map((f) => f.url());
   console.log("DEBUG url:", url);
   console.log("DEBUG title:", title);
-  console.log("DEBUG frames:", frames);
-  console.log("DEBUG html snippet:", html.slice(0, 2500));
+  console.log("DEBUG html snippet:", html.slice(0, 2000));
 }
 
 /* =========================
-   HELPERS DOM (PAGE/FRAME)
+   HELPERS DOM
 ========================= */
-async function findSelectorInPageOrFrames(page, selector) {
-  try {
-    const h = await page.$(selector);
-    if (h) return { where: "page", ctx: page, selector };
-  } catch (_) {}
-
-  for (const frame of page.frames()) {
-    try {
-      const h = await frame.$(selector);
-      if (h) return { where: `frame:${frame.url()}`, ctx: frame, selector };
-    } catch (_) {}
-  }
-  return null;
-}
-
-async function setInputValueInContext(ctx, selector, value) {
-  await ctx.waitForSelector(selector, { timeout: 20000 });
-
-  const ok = await ctx.evaluate(
+async function setInputValue(page, selector, value) {
+  await page.waitForSelector(selector, { timeout: 20000 });
+  const ok = await page.evaluate(
     ({ sel, val }) => {
       const el = document.querySelector(sel);
       if (!el) return false;
@@ -80,14 +62,12 @@ async function setInputValueInContext(ctx, selector, value) {
     },
     { sel: selector, val: value }
   );
-
   if (!ok) throw new Error(`Cannot set value for input: ${selector}`);
 }
 
-async function submitFormOfInputInContext(ctx, inputSelector) {
-  await ctx.waitForSelector(inputSelector, { timeout: 20000 });
-
-  const ok = await ctx.evaluate((sel) => {
+async function submitFormOfInput(page, inputSelector) {
+  await page.waitForSelector(inputSelector, { timeout: 20000 });
+  const ok = await page.evaluate((sel) => {
     const input = document.querySelector(sel);
     if (!input) return false;
     const form = input.closest("form");
@@ -111,7 +91,7 @@ async function submitFormOfInputInContext(ctx, inputSelector) {
 }
 
 /* =========================
-   LOGIN AUTO-DETECT
+   LOGIN AUTO
 ========================= */
 async function findLoginSelectors(page) {
   const result = await page.evaluate(() => {
@@ -137,24 +117,11 @@ async function findLoginSelectors(page) {
       return null;
     };
 
-    return {
-      userSel: pick(textCandidates[0] || null),
-      passSel: pick(password || null),
-      allInputNames: inputs.map((i) => ({
-        type: i.getAttribute("type") || "",
-        name: i.getAttribute("name") || "",
-        id: i.getAttribute("id") || "",
-        placeholder: i.getAttribute("placeholder") || "",
-      })),
-    };
+    return { userSel: pick(textCandidates[0] || null), passSel: pick(password || null) };
   });
 
-  console.log("Supplier1 DEBUG: visible inputs =", result.allInputNames);
-
-  if (!result.userSel || !result.passSel) {
-    throw new Error("Could not auto-detect login fields (user/password)");
-  }
-  return { userSel: result.userSel, passSel: result.passSel };
+  if (!result.userSel || !result.passSel) throw new Error("Could not auto-detect login fields");
+  return result;
 }
 
 async function loginIfNeeded(page) {
@@ -169,28 +136,22 @@ async function loginIfNeeded(page) {
   await gotoStable(page, loginUrl);
 
   const hasPassword = await page.$('input[type="password"]');
-  if (!hasPassword) {
-    console.log("Supplier1: already logged-in (no password field)");
-    return;
-  }
+  if (!hasPassword) return;
 
-  console.log("Supplier1: performing login (auto-detect)");
   const { userSel, passSel } = await findLoginSelectors(page);
 
   await humanDelay();
-  await setInputValueInContext(page, userSel, user);
-
+  await setInputValue(page, userSel, user);
   await humanDelay();
-  await setInputValueInContext(page, passSel, pass);
-
+  await setInputValue(page, passSel, pass);
   await humanDelay();
 
   await Promise.allSettled([
-    submitFormOfInputInContext(page, passSel),
+    submitFormOfInput(page, passSel),
     page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }),
   ]);
 
-  await humanDelay(1200, 2200);
+  await humanDelay(1000, 2000);
 
   const stillPassword = await page.$('input[type="password"]');
   if (stillPassword) {
@@ -198,10 +159,8 @@ async function loginIfNeeded(page) {
     throw new Error("Login failed or still on login page");
   }
 
-  // cookies
   const cookies = await page.cookies();
   fs.writeFileSync(COOKIE_PATH, JSON.stringify(cookies, null, 2));
-  console.log("Supplier1: login OK");
 }
 
 /* =========================
@@ -209,51 +168,41 @@ async function loginIfNeeded(page) {
 ========================= */
 const IMM_SEL = "input[name='immat']";
 
-// Choix modèle “auto” : select ou liste de liens/boutons
 async function pickFirstModelIfPresent(page) {
-  // petit délai pour laisser l’UI afficher les modèles
   await humanDelay(800, 1600);
 
   const picked = await page.evaluate(() => {
-    // 1) Cas <select>
-    const selects = Array.from(document.querySelectorAll("select"))
-      .filter((s) => s.options && s.options.length > 1);
-
+    // select
+    const selects = Array.from(document.querySelectorAll("select")).filter((s) => s.options && s.options.length > 1);
     if (selects.length) {
       const sel = selects[0];
-      sel.selectedIndex = 1; // 1er choix réel (index 0 souvent placeholder)
+      sel.selectedIndex = 1;
       sel.dispatchEvent(new Event("change", { bubbles: true }));
-
-      // cherche un submit dans le même form
       const form = sel.closest("form");
       const btn = form?.querySelector("button[type='submit'], input[type='submit']");
       if (btn) btn.click();
-
       return { ok: true, mode: "select", label: sel.options[sel.selectedIndex]?.textContent?.trim() || "" };
     }
 
-    // 2) Cas liste de liens/boutons “choisir”
+    // boutons/liens
     const candidates = Array.from(document.querySelectorAll("a,button,input[type='button'],input[type='submit']"));
     const pick = candidates.find((el) => {
       const txt = (el.textContent || "").toLowerCase();
       const v = (el.value || "").toLowerCase();
       return txt.includes("choisir") || txt.includes("sélection") || txt.includes("selection") || v.includes("choisir");
     });
-
     if (pick) {
       pick.scrollIntoView({ block: "center" });
       pick.click();
       return { ok: true, mode: "button", label: (pick.textContent || pick.value || "").trim() };
     }
 
-    // 3) rien trouvé
     return { ok: false };
   });
 
   console.log("Supplier1: model pick =", picked);
 
   if (picked && picked.ok) {
-    // navigation éventuelle
     await Promise.race([
       page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }),
       sleep(1500),
@@ -261,37 +210,79 @@ async function pickFirstModelIfPresent(page) {
     await humanDelay(800, 1600);
     return true;
   }
-
-  // pas de modèle à choisir (soit il n’y en a qu’un, soit autre UI)
   return false;
 }
 
 async function enterPlateAndMaybePickModel(page, plate) {
-  console.log("Supplier1: URL before immat:", page.url());
-
-  const found = await findSelectorInPageOrFrames(page, IMM_SEL);
-  if (!found) {
-    await dumpDebug(page, "immat_not_found");
-    throw new Error("immat input not found on page (or frames)");
-  }
-
-  const ctx = found.ctx;
-  console.log("Supplier1: immat found in", found.where);
+  await page.waitForSelector(IMM_SEL, { timeout: 25000 });
 
   await humanDelay();
-  await setInputValueInContext(ctx, IMM_SEL, plate);
+  await setInputValue(page, IMM_SEL, plate);
 
   await humanDelay(800, 1600);
 
   await Promise.allSettled([
-    submitFormOfInputInContext(ctx, IMM_SEL),
+    submitFormOfInput(page, IMM_SEL),
     page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }),
   ]);
 
   await humanDelay(1200, 2400);
-
-  // ✅ essai choix modèle
   await pickFirstModelIfPresent(page);
+}
+
+/* =========================
+   EXTRACTION BRUTE (TEST)
+========================= */
+async function extractPartsRaw(page) {
+  await humanDelay(800, 1600);
+
+  // On attend qu'il y ait au moins un tableau OU du contenu significatif
+  await Promise.race([
+    page.waitForSelector("table", { timeout: 15000 }),
+    page.waitForSelector("body", { timeout: 15000 }),
+  ]);
+
+  const data = await page.evaluate(() => {
+    const clean = (t) => (t || "").replace(/\s+/g, " ").trim();
+
+    // 1) Si une table existe, on prend la première table
+    const table = document.querySelector("table");
+    if (table) {
+      const rows = Array.from(table.querySelectorAll("tr")).slice(0, 30);
+      const extracted = rows.map((tr) =>
+        Array.from(tr.querySelectorAll("th,td")).map((td) => clean(td.textContent))
+      );
+      return { mode: "table", extracted };
+    }
+
+    // 2) sinon on prend un extrait de texte de la page
+    const text = clean(document.body?.innerText || "");
+    return { mode: "text", extracted: text.slice(0, 2000) };
+  });
+
+  // Convertit en "parts" basiques pour Hostinger (test)
+  if (data.mode === "table") {
+    const parts = data.extracted
+      .map((row) => ({
+        name: row.filter(Boolean).slice(0, 5).join(" | "),
+        price: 0,
+        supplier: "Supplier1",
+        url: page.url(),
+      }))
+      .filter((p) => p.name);
+
+    return parts.slice(0, 20);
+  }
+
+  // mode texte
+  return [
+    {
+      name: "RAW_TEXT: " + String(data.extracted).slice(0, 180),
+      price: 0,
+      supplier: "Supplier1",
+      url: page.url(),
+    },
+  ];
 }
 
 /* =========================
@@ -323,34 +314,23 @@ async function supplier1Scrape(plate) {
   try {
     await loginIfNeeded(page);
 
-    // après login, on arrive sur un écran de recherche plaque via l’app
-    // si tu as une URL menu fixe, mets SUP_URL_MENU ; sinon on reste sur l’état actuel
-    if (process.env.SUP_URL_MENU) {
-      await gotoStable(page, process.env.SUP_URL_MENU);
-    } else {
-      await humanDelay();
-    }
+    // Après login, on est dans l'app
+    await humanDelay();
 
+    // Plaque + modèle
     await enterPlateAndMaybePickModel(page, plate);
+
+    // ✅ Extraction brute
+    const parts = await extractPartsRaw(page);
+
+    await browser.close();
+    return parts;
   } catch (e) {
     console.log("Supplier1 ERROR:", String(e?.message || e));
     await dumpDebug(page, "supplier1_error");
     await browser.close();
     throw e;
   }
-
-  const afterUrl = page.url();
-  await browser.close();
-
-  // ✅ Validation : plaque OK + modèle peut-être choisi
-  return [
-    {
-      name: "SUP1_MODEL_OK",
-      price: 0,
-      supplier: "Supplier1",
-      url: afterUrl,
-    },
-  ];
 }
 
 module.exports = supplier1Scrape;
