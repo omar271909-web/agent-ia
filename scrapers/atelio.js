@@ -169,7 +169,6 @@ async function extractModels(page) {
 
   return await page.evaluate(() => {
     const clean = (t) => (t || "").replace(/<!--[\s\S]*?-->/g, "").replace(/\s+/g, " ").trim();
-
     const rows = Array.from(document.querySelectorAll("tr.version"));
     const out = rows
       .map((tr) => {
@@ -216,8 +215,7 @@ async function pickModel(page, modelToken) {
 }
 
 /* =========================
-   PARTS / PLANCHES
-   ✅ On renvoie partToken = planche:CODE (propre)
+   PLANCHES
 ========================= */
 async function extractParts(page) {
   await humanDelay(800, 1500);
@@ -230,9 +228,8 @@ async function extractParts(page) {
     };
 
     const out = [];
-
-    // On prend les éléments onclick contenant codePlanche
     const nodes = Array.from(document.querySelectorAll("[onclick]"));
+
     for (const el of nodes) {
       const label = clean(el.textContent || el.getAttribute("value") || "");
       if (isNoise(label)) continue;
@@ -244,12 +241,10 @@ async function extractParts(page) {
       out.push({ label, partToken: `planche:${m[1]}` });
     }
 
-    // dédoublonnage
     const seen = new Set();
     return out.filter((x) => {
-      const k = x.partToken;
-      if (seen.has(k)) return false;
-      seen.add(k);
+      if (seen.has(x.partToken)) return false;
+      seen.add(x.partToken);
       return true;
     });
   });
@@ -263,21 +258,48 @@ async function openPlanche(page, partToken) {
 }
 
 /* =========================
-   PIECES (dans une planche)
-   ✅ On renvoie pieceToken = row:N ou href:/...
+   ✅ PIECES: choisir la bonne table + détecter véhicule expiré
 ========================= */
 async function extractPieces(page) {
   await humanDelay(800, 1500);
 
+  const expired = await page.evaluate(() => {
+    const t = (document.body?.innerText || "").toLowerCase();
+    return t.includes("ce véhicule n'est plus disponible") || t.includes("ce vehicule n'est plus disponible");
+  });
+
+  if (expired) {
+    // on dump pour avoir la preuve côté logs
+    return { error: "VEHICLE_EXPIRED", pieces: [] };
+  }
+
+  // attend au moins une table
   await Promise.race([page.waitForSelector("table", { timeout: 15000 }), sleep(1200)]);
 
-  return await page.evaluate(() => {
+  const pieces = await page.evaluate(() => {
     const clean = (t) => (t || "").replace(/<!--[\s\S]*?-->/g, "").replace(/\s+/g, " ").trim();
 
-    const table = document.querySelector("table");
-    if (!table) return [];
+    const tables = Array.from(document.querySelectorAll("table"));
+    if (!tables.length) return [];
 
-    const rows = Array.from(table.querySelectorAll("tr"));
+    // Score une table : nb de lignes + présence de mots clés
+    const scoreTable = (table) => {
+      const txt = clean(table.innerText || "");
+      const rows = table.querySelectorAll("tr").length;
+      let score = rows;
+      const low = txt.toLowerCase();
+      if (low.includes("référence") || low.includes("reference")) score += 50;
+      if (low.includes("désignation") || low.includes("designation")) score += 30;
+      if (low.includes("quantité") || low.includes("quantite")) score += 10;
+      return score;
+    };
+
+    // choisir table la plus probable
+    const best = tables
+      .map((t) => ({ t, s: scoreTable(t) }))
+      .sort((a, b) => b.s - a.s)[0].t;
+
+    const rows = Array.from(best.querySelectorAll("tr"));
     const out = [];
 
     for (let i = 0; i < rows.length; i++) {
@@ -285,7 +307,7 @@ async function extractPieces(page) {
       const txt = clean(tr.textContent);
       if (!txt || txt.length < 3) continue;
 
-      // si lien direct dans la ligne
+      // lien direct
       const a = tr.querySelector("a[href]");
       if (a) {
         const href = (a.getAttribute("href") || "").trim();
@@ -295,19 +317,24 @@ async function extractPieces(page) {
         }
       }
 
-      // sinon on clique la ligne par index
+      // sinon index
       out.push({ label: txt.slice(0, 160), pieceToken: `row:${i}` });
     }
 
-    // dédoublonnage basique
+    // filtre un peu les lignes “vides”
+    const filtered = out.filter((x) => x.label.length > 8);
+
+    // dédoublonnage
     const seen = new Set();
-    return out.filter((x) => {
+    return filtered.filter((x) => {
       const k = x.pieceToken;
       if (seen.has(k)) return false;
       seen.add(k);
       return true;
     }).slice(0, 200);
   });
+
+  return { error: null, pieces };
 }
 
 async function pickPiece(page, pieceToken) {
@@ -321,12 +348,27 @@ async function pickPiece(page, pieceToken) {
   if (pieceToken.startsWith("row:")) {
     const idx = Number(pieceToken.slice("row:".length));
     await page.evaluate((idx) => {
-      const table = document.querySelector("table");
-      if (!table) return;
-      const rows = Array.from(table.querySelectorAll("tr"));
+      const tables = Array.from(document.querySelectorAll("table"));
+      if (!tables.length) return;
+
+      // reprend la meilleure table comme extractPieces
+      const clean = (t) => (t || "").replace(/\s+/g, " ").trim();
+      const scoreTable = (table) => {
+        const txt = clean(table.innerText || "");
+        const rows = table.querySelectorAll("tr").length;
+        let score = rows;
+        const low = txt.toLowerCase();
+        if (low.includes("référence") || low.includes("reference")) score += 50;
+        if (low.includes("désignation") || low.includes("designation")) score += 30;
+        if (low.includes("quantité") || low.includes("quantite")) score += 10;
+        return score;
+      };
+      const best = tables.map((t) => ({ t, s: scoreTable(t) })).sort((a, b) => b.s - a.s)[0].t;
+
+      const rows = Array.from(best.querySelectorAll("tr"));
       const tr = rows[idx];
       if (!tr) return;
-      // tente de cliquer un élément cliquable dans la ligne
+
       const a = tr.querySelector("a");
       if (a) a.click();
       else tr.click();
@@ -430,9 +472,17 @@ async function getPiecesByPlateModelPlanche(plate, modelToken, partToken) {
     await pickModel(page, modelToken);
     await openPlanche(page, partToken);
 
-    const pieces = await extractPieces(page);
-    if (!pieces.length) await dumpDebug(page, "pieces_empty");
+    const { error, pieces } = await extractPieces(page);
+    if (error) {
+      await dumpDebug(page, "vehicle_expired");
+      await browser.close();
+      // on renvoie une erreur claire côté API
+      const err = new Error(error);
+      err.code = error;
+      throw err;
+    }
 
+    if (!pieces.length) await dumpDebug(page, "pieces_empty");
     await browser.close();
     return pieces;
   } catch (e) {
@@ -451,6 +501,16 @@ async function getRefByPlateModelPlanchePiece(plate, modelToken, partToken, piec
     await enterPlate(page, plate);
     await pickModel(page, modelToken);
     await openPlanche(page, partToken);
+
+    const { error } = await extractPieces(page);
+    if (error) {
+      await dumpDebug(page, "vehicle_expired");
+      await browser.close();
+      const err = new Error(error);
+      err.code = error;
+      throw err;
+    }
+
     await pickPiece(page, pieceToken);
 
     const ref = await extractReference(page);
