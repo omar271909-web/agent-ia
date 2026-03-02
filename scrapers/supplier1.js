@@ -20,19 +20,71 @@ const gotoStable = async (page, url) => {
   await sleep(500);
 };
 
+// ✅ Clique robuste : clique le 1er élément visible correspondant au sélecteur
+async function clickFirstVisible(page, selector) {
+  await page.waitForSelector(selector, { timeout: 20000 });
+
+  const ok = await page.evaluate((sel) => {
+    const els = Array.from(document.querySelectorAll(sel));
+    const visible = els.find((el) => {
+      const r = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      const visibleBox = r.width > 0 && r.height > 0;
+      const visibleStyle = style.display !== "none" && style.visibility !== "hidden";
+      const enabled = !el.disabled;
+      return visibleBox && visibleStyle && enabled;
+    });
+
+    if (!visible) return false;
+    visible.scrollIntoView({ block: "center" });
+    visible.click();
+    return true;
+  }, selector);
+
+  if (!ok) {
+    throw new Error(`No visible clickable element for selector: ${selector}`);
+  }
+}
+
+// ✅ Clique robuste du submit du formulaire qui contient un input donné (ex: immat)
+async function clickSubmitOfInputForm(page, inputSelector) {
+  await page.waitForSelector(inputSelector, { timeout: 20000 });
+
+  const ok = await page.evaluate((sel) => {
+    const input = document.querySelector(sel);
+    if (!input) return false;
+
+    const form = input.closest("form");
+    if (!form) return false;
+
+    const btn =
+      form.querySelector("button[type='submit']") ||
+      form.querySelector("input[type='submit']");
+
+    if (!btn) return false;
+
+    btn.scrollIntoView({ block: "center" });
+    btn.click();
+    return true;
+  }, inputSelector);
+
+  if (!ok) {
+    throw new Error(`Could not click submit button for form containing: ${inputSelector}`);
+  }
+}
+
 /* =========================
    SELECTEURS
 ========================= */
 
 const SEL = {
-  // LOGIN (adapter si besoin)
+  // Login (à adapter si ton fournisseur a un autre champ)
   email: "input[name='email'], input[type='email']",
   password: "input[type='password']",
   loginSubmit: "button[type='submit'], input[type='submit']",
 
-  // PLAQUE (confirmé par toi)
+  // Plaque (confirmé)
   immatInput: "input[name='immat']",
-  immatSubmit: "button[type='submit'], input[type='submit']",
 };
 
 /* =========================
@@ -67,12 +119,17 @@ async function saveCookies(page) {
 ========================= */
 
 async function loginIfNeeded(page) {
-  if (!process.env.SUP_URL_LOGIN) {
-    throw new Error("SUP_URL_LOGIN not defined");
-  }
+  const loginUrl = process.env.SUP_URL_LOGIN;
+  const user = process.env.SUP_USER || "";
+  const pass = process.env.SUP_PASS || "";
 
-  await gotoStable(page, process.env.SUP_URL_LOGIN);
+  if (!loginUrl) throw new Error("SUP_URL_LOGIN not defined");
+  if (!user) throw new Error("SUP_USER not defined");
+  if (!pass) throw new Error("SUP_PASS not defined");
 
+  await gotoStable(page, loginUrl);
+
+  // si déjà connecté, parfois il n'y a pas de champ password
   const hasPassword = await page.$(SEL.password);
   if (!hasPassword) {
     console.log("Supplier1: already logged-in");
@@ -85,17 +142,17 @@ async function loginIfNeeded(page) {
   await humanDelay();
 
   await page.click(SEL.email, { clickCount: 3 });
-  await page.type(SEL.email, process.env.SUP_USER || "", { delay: 25 });
+  await page.type(SEL.email, user, { delay: 25 });
 
   await humanDelay();
 
   await page.click(SEL.password, { clickCount: 3 });
-  await page.type(SEL.password, process.env.SUP_PASS || "", { delay: 25 });
+  await page.type(SEL.password, pass, { delay: 25 });
 
   await humanDelay();
 
   await Promise.allSettled([
-    page.click(SEL.loginSubmit),
+    clickFirstVisible(page, SEL.loginSubmit),
     page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }),
   ]);
 
@@ -104,10 +161,11 @@ async function loginIfNeeded(page) {
 }
 
 /* =========================
-   PLAQUE
+   PLAQUE (immat)
 ========================= */
 
 async function enterPlate(page, plate) {
+  // si tu as une URL menu fixe, mets-la en variable
   if (process.env.SUP_URL_MENU) {
     await gotoStable(page, process.env.SUP_URL_MENU);
   } else {
@@ -118,16 +176,20 @@ async function enterPlate(page, plate) {
 
   console.log("Supplier1: entering plate", plate);
 
+  await humanDelay();
+
   await page.click(SEL.immatInput, { clickCount: 3 });
   await page.type(SEL.immatInput, plate, { delay: 35 });
 
   await humanDelay(800, 1600);
 
+  // ✅ IMPORTANT : on clique le submit du FORMULAIRE qui contient input[name=immat]
   await Promise.allSettled([
-    page.click(SEL.immatSubmit),
+    clickSubmitOfInputForm(page, SEL.immatInput),
     page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }),
   ]);
 
+  // si AJAX
   await humanDelay(1200, 2400);
 }
 
@@ -142,10 +204,10 @@ async function supplier1Scrape(plate) {
   const browser = await launchBrowser();
   const page = await browser.newPage();
 
+  // anti-ban léger
   await page.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
   );
-
   await page.setViewport({ width: 1366, height: 768 });
 
   await loadCookies(page);
@@ -156,6 +218,7 @@ async function supplier1Scrape(plate) {
 
   await browser.close();
 
+  // On valide juste “plaque OK” pour l’instant
   return [
     {
       name: "SUP1_PLATE_OK",
