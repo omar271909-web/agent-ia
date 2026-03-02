@@ -8,7 +8,6 @@ const COOKIE_PATH = "/tmp/supplier1-cookies.json";
 ========================= */
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 const humanDelay = async (min = 600, max = 1400) => {
   const t = Math.floor(min + Math.random() * (max - min));
   await sleep(t);
@@ -20,34 +19,53 @@ const gotoStable = async (page, url) => {
   await sleep(500);
 };
 
-// ✅ Clique robuste : clique le 1er élément visible correspondant au sélecteur
+// ✅ Clic robuste (JS) : aucun .click Puppeteer
 async function clickFirstVisible(page, selector) {
   await page.waitForSelector(selector, { timeout: 20000 });
 
   const ok = await page.evaluate((sel) => {
     const els = Array.from(document.querySelectorAll(sel));
-    const visible = els.find((el) => {
-      const r = el.getBoundingClientRect();
-      const style = window.getComputedStyle(el);
-      const visibleBox = r.width > 0 && r.height > 0;
-      const visibleStyle = style.display !== "none" && style.visibility !== "hidden";
-      const enabled = !el.disabled;
-      return visibleBox && visibleStyle && enabled;
+    const el = els.find((e) => {
+      const r = e.getBoundingClientRect();
+      const s = window.getComputedStyle(e);
+      return r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden" && !e.disabled;
     });
-
-    if (!visible) return false;
-    visible.scrollIntoView({ block: "center" });
-    visible.click();
+    if (!el) return false;
+    el.scrollIntoView({ block: "center" });
+    el.click();
     return true;
   }, selector);
 
-  if (!ok) {
-    throw new Error(`No visible clickable element for selector: ${selector}`);
-  }
+  if (!ok) throw new Error(`No visible clickable element for selector: ${selector}`);
 }
 
-// ✅ Clique robuste du submit du formulaire qui contient un input donné (ex: immat)
-async function clickSubmitOfInputForm(page, inputSelector) {
+// ✅ Remplissage robuste : set value + events (aucun click)
+async function setInputValue(page, selector, value) {
+  await page.waitForSelector(selector, { timeout: 20000 });
+
+  const ok = await page.evaluate(
+    ({ sel, val }) => {
+      const el = document.querySelector(sel);
+      if (!el) return false;
+
+      el.scrollIntoView({ block: "center" });
+
+      // Pour inputs classiques
+      el.value = val;
+
+      // Déclenche les events comme un vrai utilisateur
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    },
+    { sel: selector, val: value }
+  );
+
+  if (!ok) throw new Error(`Cannot set value for input: ${selector}`);
+}
+
+// ✅ Clique le submit du FORM qui contient l’input (immat)
+async function submitFormOfInput(page, inputSelector) {
   await page.waitForSelector(inputSelector, { timeout: 20000 });
 
   const ok = await page.evaluate((sel) => {
@@ -57,20 +75,24 @@ async function clickSubmitOfInputForm(page, inputSelector) {
     const form = input.closest("form");
     if (!form) return false;
 
-    const btn =
-      form.querySelector("button[type='submit']") ||
-      form.querySelector("input[type='submit']");
+    // 1) bouton submit si présent
+    const btn = form.querySelector("button[type='submit'], input[type='submit']");
+    if (btn) {
+      btn.scrollIntoView({ block: "center" });
+      btn.click();
+      return true;
+    }
 
-    if (!btn) return false;
+    // 2) sinon submit() JS
+    if (typeof form.submit === "function") {
+      form.submit();
+      return true;
+    }
 
-    btn.scrollIntoView({ block: "center" });
-    btn.click();
-    return true;
+    return false;
   }, inputSelector);
 
-  if (!ok) {
-    throw new Error(`Could not click submit button for form containing: ${inputSelector}`);
-  }
+  if (!ok) throw new Error(`Cannot submit form for input: ${inputSelector}`);
 }
 
 /* =========================
@@ -78,7 +100,7 @@ async function clickSubmitOfInputForm(page, inputSelector) {
 ========================= */
 
 const SEL = {
-  // Login (à adapter si ton fournisseur a un autre champ)
+  // Login (à adapter si besoin)
   email: "input[name='email'], input[type='email']",
   password: "input[type='password']",
   loginSubmit: "button[type='submit'], input[type='submit']",
@@ -88,7 +110,7 @@ const SEL = {
 };
 
 /* =========================
-   NAVIGATEUR
+   COOKIES
 ========================= */
 
 async function launchBrowser() {
@@ -129,7 +151,7 @@ async function loginIfNeeded(page) {
 
   await gotoStable(page, loginUrl);
 
-  // si déjà connecté, parfois il n'y a pas de champ password
+  // Si déjà connecté, parfois pas de champ password
   const hasPassword = await page.$(SEL.password);
   if (!hasPassword) {
     console.log("Supplier1: already logged-in");
@@ -138,16 +160,11 @@ async function loginIfNeeded(page) {
 
   console.log("Supplier1: performing login");
 
-  await page.waitForSelector(SEL.email, { timeout: 20000 });
   await humanDelay();
-
-  await page.click(SEL.email, { clickCount: 3 });
-  await page.type(SEL.email, user, { delay: 25 });
+  await setInputValue(page, SEL.email, user);
 
   await humanDelay();
-
-  await page.click(SEL.password, { clickCount: 3 });
-  await page.type(SEL.password, pass, { delay: 25 });
+  await setInputValue(page, SEL.password, pass);
 
   await humanDelay();
 
@@ -161,35 +178,28 @@ async function loginIfNeeded(page) {
 }
 
 /* =========================
-   PLAQUE (immat)
+   PLAQUE
 ========================= */
 
 async function enterPlate(page, plate) {
-  // si tu as une URL menu fixe, mets-la en variable
   if (process.env.SUP_URL_MENU) {
     await gotoStable(page, process.env.SUP_URL_MENU);
   } else {
     await humanDelay();
   }
 
-  await page.waitForSelector(SEL.immatInput, { timeout: 20000 });
-
   console.log("Supplier1: entering plate", plate);
 
   await humanDelay();
-
-  await page.click(SEL.immatInput, { clickCount: 3 });
-  await page.type(SEL.immatInput, plate, { delay: 35 });
+  await setInputValue(page, SEL.immatInput, plate);
 
   await humanDelay(800, 1600);
 
-  // ✅ IMPORTANT : on clique le submit du FORMULAIRE qui contient input[name=immat]
   await Promise.allSettled([
-    clickSubmitOfInputForm(page, SEL.immatInput),
+    submitFormOfInput(page, SEL.immatInput),
     page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }),
   ]);
 
-  // si AJAX
   await humanDelay(1200, 2400);
 }
 
@@ -204,7 +214,6 @@ async function supplier1Scrape(plate) {
   const browser = await launchBrowser();
   const page = await browser.newPage();
 
-  // anti-ban léger
   await page.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
   );
@@ -218,7 +227,6 @@ async function supplier1Scrape(plate) {
 
   await browser.close();
 
-  // On valide juste “plaque OK” pour l’instant
   return [
     {
       name: "SUP1_PLATE_OK",
