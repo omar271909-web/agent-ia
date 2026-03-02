@@ -1,33 +1,37 @@
 const axios = require("axios");
 
 async function sendToHostinger({ plate, parts }) {
-
   const url = process.env.HOSTINGER_URL;
   const token = process.env.HOSTINGER_TOKEN;
 
-  if (!url) {
-    throw new Error("HOSTINGER_URL not defined");
-  }
+  try {
+    const response = await axios.post(
+      url,
+      { plate, parts },
+      {
+        timeout: 15000,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Auth-Token": token,
+        },
+        // Important pour lire la réponse même si c'est une erreur
+        validateStatus: () => true,
+      }
+    );
 
-  if (!token) {
-    throw new Error("HOSTINGER_TOKEN not defined");
-  }
+    console.log("Hostinger status:", response.status);
+    console.log("Hostinger data:", response.data);
 
-  const response = await axios.post(
-    url,
-    { plate, parts },
-    {
-      timeout: 15000,
-      headers: {
-        "Content-Type": "application/json",
-        "X-Auth-Token": token,
-      },
+    // si Hostinger renvoie une erreur, on la remonte clairement
+    if (response.status >= 400) {
+      throw new Error(`Hostinger error ${response.status}: ${JSON.stringify(response.data)}`);
     }
-  );
 
-  console.log("Hostinger response:", response.data);
-
-  return response.data;
+    return response.data;
+  } catch (e) {
+    console.error("sendToHostinger failed:", e?.message || e);
+    throw e;
+  }
 }
 
 module.exports = sendToHostinger;
