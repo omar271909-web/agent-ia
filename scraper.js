@@ -1,18 +1,9 @@
+const supplier1Scrape = require("./scrapers/supplier1");
 const sendToHostinger = require("./sendToHostinger");
 
 async function scrape(plate) {
-  const parts = [
-    {
-      name: "TEST_INSERT_OK",
-      price: 12.34,
-      supplier: "RailwayTest",
-      url: "https://example.com"
-    }
-  ];
-
-  const resp = await sendToHostinger({ plate, parts });
-  console.log("Saved to Hostinger:", resp);
-
+  const parts = await supplier1Scrape(plate);
+  await sendToHostinger({ plate, parts });
   return parts;
 }
 
