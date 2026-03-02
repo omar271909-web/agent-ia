@@ -47,7 +47,7 @@ async function dumpDebug(page, tag) {
 }
 
 /**
- * Login auto: on prend 1 input texte visible + 1 password visible et on submit le form du password
+ * Login auto (fonctionne déjà chez toi)
  */
 async function loginIfNeeded(page) {
   const loginUrl = process.env.SUP_URL_LOGIN;
@@ -60,7 +60,7 @@ async function loginIfNeeded(page) {
   await gotoStable(page, loginUrl);
 
   const hasPassword = await page.$('input[type="password"]');
-  if (!hasPassword) return; // déjà loggé
+  if (!hasPassword) return;
 
   const sels = await page.evaluate(() => {
     const isVisible = (el) => {
@@ -92,7 +92,6 @@ async function loginIfNeeded(page) {
     throw new Error("Could not auto-detect login fields");
   }
 
-  // set value via JS
   await page.evaluate(
     ({ userSel, passSel, user, pass }) => {
       const u = document.querySelector(userSel);
@@ -110,7 +109,6 @@ async function loginIfNeeded(page) {
 
   await humanDelay();
 
-  // submit form of password
   await Promise.allSettled([
     page.evaluate((passSel) => {
       const p = document.querySelector(passSel);
@@ -134,7 +132,7 @@ async function loginIfNeeded(page) {
 }
 
 /**
- * Entrer plaque: input name="immat", submit le form
+ * Entrer plaque: input name="immat"
  */
 async function enterPlate(page, plate) {
   const immSel = "input[name='immat']";
@@ -168,62 +166,119 @@ async function enterPlate(page, plate) {
 }
 
 /**
- * Extract models (versions) after plate:
- * - si <select> => options
- * - sinon => liens/boutons cliquables (texte + href)
- * On renvoie {label, modelToken}
+ * ✅ EXTRACT MODELS = lit la table des versions
+ * tr.version avec onclick="choose_version(173269)"
+ * -> modelToken = choose:173269
  */
 async function extractModels(page) {
-  await humanDelay(700, 1400);
+  await humanDelay(600, 1200);
 
-  return await page.evaluate(() => {
-    const clean = (t) => (t || "").replace(/\s+/g, " ").trim();
+  // attendre la présence des lignes de versions
+  await page.waitForSelector("tr.version", { timeout: 25000 });
 
-    // 1) select
-    const selects = Array.from(document.querySelectorAll("select")).filter((s) => s.options && s.options.length > 1);
-    if (selects.length) {
-      const sel = selects[0];
-      const opts = Array.from(sel.options)
-        .map((o) => ({ label: clean(o.textContent), value: (o.value || "").trim() }))
-        .filter((o, idx) => idx !== 0 && o.label);
-      return opts.map((o) => ({ label: o.label, modelToken: `select:${o.value}` }));
-    }
+  const models = await page.evaluate(() => {
+    const clean = (t) => (t || "").replace(/<!--[\s\S]*?-->/g, "").replace(/\s+/g, " ").trim();
 
-    // 2) liens sur page (souvent liste versions)
-    const links = Array.from(document.querySelectorAll("a"))
-      .map((a) => ({ label: clean(a.textContent), href: a.getAttribute("href") || "" }))
-      .filter((x) => x.label && x.href && x.href !== "#")
-      .slice(0, 50);
+    const rows = Array.from(document.querySelectorAll("tr.version"));
+    const out = rows
+      .map((tr) => {
+        const onclick = tr.getAttribute("onclick") || "";
+        const m = onclick.match(/choose_version\((\d+)\)/);
+        const id = m ? m[1] : "";
+        const label = clean(tr.textContent);
+        if (!id || !label) return null;
+        return { label, modelToken: `choose:${id}` };
+      })
+      .filter(Boolean);
 
-    return links.map((x) => ({ label: x.label, modelToken: `href:${x.href}` }));
+    // dédoublonnage
+    const seen = new Set();
+    return out.filter((x) => {
+      const k = x.modelToken;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
   });
+
+  return models;
 }
 
+/**
+ * ✅ Clique la version choisie
+ */
 async function pickModel(page, modelToken) {
-  if (modelToken.startsWith("select:")) {
-    const value = modelToken.slice("select:".length);
-    // choisit option et submit
-    await page.evaluate((value) => {
-      const sel = Array.from(document.querySelectorAll("select")).find((s) => s.options && s.options.length > 1);
-      if (!sel) return;
-      sel.value = value;
-      sel.dispatchEvent(new Event("change", { bubbles: true }));
-      const form = sel.closest("form");
-      const btn = form?.querySelector("button[type='submit'],input[type='submit']");
-      if (btn) btn.click();
-      else if (form && typeof form.submit === "function") form.submit();
-    }, value);
-  } else if (modelToken.startsWith("href:")) {
-    const href = modelToken.slice("href:".length);
-    // clique lien par href
-    await page.evaluate((href) => {
-      const a = Array.from(document.querySelectorAll("a")).find((x) => (x.getAttribute("href") || "") === href);
-      if (a) a.click();
-      else window.location.href = href;
-    }, href);
-  } else {
-    throw new Error("Unknown modelToken format");
-  }
+  if (!modelToken.startsWith("choose:")) throw new Error("Unknown modelToken format");
+  const id = modelToken.slice("choose:".length);
+
+  await page.evaluate((id) => {
+    // Atelio a la fonction globale choose_version()
+    if (typeof window.choose_version === "function") {
+      window.choose_version(Number(id));
+      return;
+    }
+
+    // fallback: chercher un tr.onclick correspondant
+    const tr = Array.from(document.querySelectorAll("tr.version")).find((r) => {
+      const oc = r.getAttribute("onclick") || "";
+      return oc.includes(`choose_version(${id})`);
+    });
+    if (tr) tr.click();
+  }, id);
+
+  // souvent navigation/ajax, on attend que l'URL change OU que la page charge un nouveau contenu
+  await Promise.race([
+    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }),
+    sleep(1800),
+  ]);
+
+  await humanDelay(800, 1600);
+}
+
+/**
+ * Étape suivante (on la fait ensuite): extraire une liste de pièces/familles à cliquer
+ * Ici on met une extraction “simple” des liens cliquables non bruit
+ */
+async function extractParts(page) {
+  await humanDelay(700, 1400);
+
+  const parts = await page.evaluate(() => {
+    const clean = (t) => (t || "").replace(/<!--[\s\S]*?-->/g, "").replace(/\s+/g, " ").trim();
+    const isNoise = (label) => {
+      const s = label.toLowerCase();
+      return s.includes("assistance") || s.includes("hotline") || s.includes("déconnexion") || s.includes("deconnexion");
+    };
+
+    // on récupère liens cliquables
+    const links = Array.from(document.querySelectorAll("a"))
+      .map((a) => ({ label: clean(a.textContent), href: (a.getAttribute("href") || "").trim() }))
+      .filter((x) => x.label && x.href && x.href !== "#" && !x.href.toLowerCase().startsWith("javascript") && !isNoise(x.label))
+      .slice(0, 150);
+
+    // dédoublonnage
+    const seen = new Set();
+    return links
+      .filter((x) => {
+        const k = x.label.toLowerCase() + "|" + x.href;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      })
+      .map((x) => ({ label: x.label, partToken: `href:${x.href}` }));
+  });
+
+  return parts;
+}
+
+async function pickPart(page, partToken) {
+  if (!partToken.startsWith("href:")) throw new Error("Unknown partToken format");
+  const href = partToken.slice("href:".length);
+
+  await page.evaluate((href) => {
+    const a = Array.from(document.querySelectorAll("a")).find((x) => (x.getAttribute("href") || "").trim() === href);
+    if (a) a.click();
+    else window.location.href = href;
+  }, href);
 
   await Promise.race([
     page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }),
@@ -234,119 +289,30 @@ async function pickModel(page, modelToken) {
 }
 
 /**
- * Extract parts list (simple): on liste liens/boutons "détailler/choisir" OU lignes de table
- * On renvoie {label, partToken}
- */
-async function extractParts(page) {
-  await humanDelay(700, 1400);
-
-  return await page.evaluate(() => {
-    const clean = (t) => (t || "").replace(/\s+/g, " ").trim();
-
-    // 1) liens (souvent navigation vers familles/pièces)
-    const links = Array.from(document.querySelectorAll("a"))
-      .map((a) => ({ label: clean(a.textContent), href: a.getAttribute("href") || "" }))
-      .filter((x) => x.label && x.href && x.href !== "#");
-
-    // heuristique: garder les liens utiles
-    const filtered = links
-      .filter((x) => x.label.length >= 3)
-      .slice(0, 80)
-      .map((x) => ({ label: x.label, partToken: `href:${x.href}` }));
-
-    // 2) si rien, on tente lignes table
-    if (filtered.length) return filtered;
-
-    const table = document.querySelector("table");
-    if (!table) return [];
-    const rows = Array.from(table.querySelectorAll("tr")).slice(0, 50);
-    return rows
-      .map((tr, i) => {
-        const txt = clean(tr.textContent);
-        if (!txt) return null;
-        return { label: txt.slice(0, 120), partToken: `row:${i}` };
-      })
-      .filter(Boolean);
-  });
-}
-
-async function pickPart(page, partToken) {
-  if (partToken.startsWith("href:")) {
-    const href = partToken.slice("href:".length);
-    await page.evaluate((href) => {
-      const a = Array.from(document.querySelectorAll("a")).find((x) => (x.getAttribute("href") || "") === href);
-      if (a) a.click();
-      else window.location.href = href;
-    }, href);
-
-    await Promise.race([
-      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }),
-      sleep(1500),
-    ]);
-
-    await humanDelay(800, 1600);
-    return;
-  }
-
-  // row:... (fallback) => on clique la ligne si possible
-  if (partToken.startsWith("row:")) {
-    const idx = Number(partToken.slice("row:".length));
-    await page.evaluate((idx) => {
-      const table = document.querySelector("table");
-      const rows = table ? Array.from(table.querySelectorAll("tr")) : [];
-      const tr = rows[idx];
-      if (!tr) return;
-      // clique un lien dans la ligne si possible
-      const a = tr.querySelector("a");
-      if (a) a.click();
-    }, idx);
-
-    await Promise.race([
-      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }),
-      sleep(1500),
-    ]);
-
-    await humanDelay(800, 1600);
-    return;
-  }
-
-  throw new Error("Unknown partToken format");
-}
-
-/**
- * Extract reference (heuristique): cherche "Réf" / "Référence" puis un code alphanum >=6
+ * Extraction référence (heuristique simple)
  */
 async function extractReference(page) {
   await humanDelay(700, 1400);
 
   return await page.evaluate(() => {
     const text = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+    const lower = text.toLowerCase();
 
-    // prioritaire: patterns autour de Réf / Référence
-    const around = (kw) => {
-      const i = text.toLowerCase().indexOf(kw);
+    const pickWindow = (kw) => {
+      const i = lower.indexOf(kw);
       if (i === -1) return "";
-      return text.slice(Math.max(0, i - 80), Math.min(text.length, i + 200));
+      return text.slice(Math.max(0, i - 80), Math.min(text.length, i + 260));
     };
 
-    const chunks = [around("réf"), around("référence"), around("reference"), around("oem")].filter(Boolean);
-    const hay = chunks.join("  ||  ") || text;
+    const hay = [pickWindow("réf"), pickWindow("référence"), pickWindow("reference"), pickWindow("oem")]
+      .filter(Boolean)
+      .join(" || ") || text;
 
-    // codes possibles (Atelio/OEM) : alphanum 6-25
     const m = hay.match(/\b[A-Z0-9][A-Z0-9\-\.]{5,24}\b/i);
-    const candidate = m ? m[0] : "";
 
-    return {
-      candidate,
-      pageUrl: window.location.href,
-      snippet: hay.slice(0, 250),
-    };
+    return { candidate: m ? m[0] : "", pageUrl: window.location.href, snippet: hay.slice(0, 260) };
   });
 }
-
-/* =========================
-   FLOW PUBLIC
-========================= */
 
 async function newBrowserPage() {
   const browser = await puppeteer.launch({
@@ -362,20 +328,24 @@ async function newBrowserPage() {
   return { browser, page };
 }
 
+/* =========================
+   API PUBLIC
+========================= */
+
 async function getModelsByPlate(plate) {
   const { browser, page } = await newBrowserPage();
   try {
     await loginIfNeeded(page);
 
-    // après login, normalement tu arrives dans l'app, et tu as immat
-    // si tu as une URL directe du menu immat, mets SUP_URL_MENU
-    if (process.env.SUP_URL_MENU) {
-      await gotoStable(page, process.env.SUP_URL_MENU);
-    }
+    // si tu as une URL directe de l’écran immat, mets SUP_URL_MENU
+    if (process.env.SUP_URL_MENU) await gotoStable(page, process.env.SUP_URL_MENU);
 
     await enterPlate(page, plate);
 
     const models = await extractModels(page);
+
+    if (!models || models.length === 0) await dumpDebug(page, "models_empty");
+
     await browser.close();
     return models;
   } catch (e) {
@@ -392,10 +362,11 @@ async function getPartsByPlateAndModel(plate, modelToken) {
     if (process.env.SUP_URL_MENU) await gotoStable(page, process.env.SUP_URL_MENU);
 
     await enterPlate(page, plate);
-    // on est sur écran versions
     await pickModel(page, modelToken);
 
     const parts = await extractParts(page);
+    if (!parts || parts.length === 0) await dumpDebug(page, "parts_empty");
+
     await browser.close();
     return parts;
   } catch (e) {
@@ -416,6 +387,8 @@ async function getRefByPlateModelPart(plate, modelToken, partToken) {
     await pickPart(page, partToken);
 
     const ref = await extractReference(page);
+    if (!ref || !ref.candidate) await dumpDebug(page, "ref_empty");
+
     await browser.close();
     return ref;
   } catch (e) {
