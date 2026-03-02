@@ -8,6 +8,7 @@ const COOKIE_PATH = "/tmp/supplier1-cookies.json";
 ========================= */
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 const humanDelay = async (min = 600, max = 1400) => {
   const t = Math.floor(min + Math.random() * (max - min));
   await sleep(t);
@@ -19,7 +20,7 @@ const gotoStable = async (page, url) => {
   await sleep(500);
 };
 
-// ✅ Clic robuste (JS) : aucun .click Puppeteer
+// ✅ Clic robuste (dans la page) via JS
 async function clickFirstVisible(page, selector) {
   await page.waitForSelector(selector, { timeout: 20000 });
 
@@ -28,7 +29,13 @@ async function clickFirstVisible(page, selector) {
     const el = els.find((e) => {
       const r = e.getBoundingClientRect();
       const s = window.getComputedStyle(e);
-      return r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden" && !e.disabled;
+      return (
+        r.width > 0 &&
+        r.height > 0 &&
+        s.display !== "none" &&
+        s.visibility !== "hidden" &&
+        !e.disabled
+      );
     });
     if (!el) return false;
     el.scrollIntoView({ block: "center" });
@@ -39,23 +46,40 @@ async function clickFirstVisible(page, selector) {
   if (!ok) throw new Error(`No visible clickable element for selector: ${selector}`);
 }
 
-// ✅ Remplissage robuste : set value + events (aucun click)
-async function setInputValue(page, selector, value) {
-  await page.waitForSelector(selector, { timeout: 20000 });
+// ✅ Cherche un selector sur page ou dans les iframes
+async function findSelectorInPageOrFrames(page, selector) {
+  // 1) page
+  try {
+    const h = await page.$(selector);
+    if (h) return { where: "page", ctx: page, selector };
+  } catch (_) {}
 
-  const ok = await page.evaluate(
+  // 2) frames
+  for (const frame of page.frames()) {
+    try {
+      const h = await frame.$(selector);
+      if (h) return { where: `frame:${frame.url()}`, ctx: frame, selector };
+    } catch (_) {}
+  }
+
+  return null;
+}
+
+// ✅ Remplit un input via JS + events, dans page OU frame
+async function setInputValueInContext(ctx, selector, value) {
+  await ctx.waitForSelector(selector, { timeout: 20000 });
+
+  const ok = await ctx.evaluate(
     ({ sel, val }) => {
       const el = document.querySelector(sel);
       if (!el) return false;
 
       el.scrollIntoView({ block: "center" });
-
-      // Pour inputs classiques
       el.value = val;
 
-      // Déclenche les events comme un vrai utilisateur
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
+
       return true;
     },
     { sel: selector, val: value }
@@ -64,18 +88,17 @@ async function setInputValue(page, selector, value) {
   if (!ok) throw new Error(`Cannot set value for input: ${selector}`);
 }
 
-// ✅ Clique le submit du FORM qui contient l’input (immat)
-async function submitFormOfInput(page, inputSelector) {
-  await page.waitForSelector(inputSelector, { timeout: 20000 });
+// ✅ Submit le form qui contient l’input (page OU frame)
+async function submitFormOfInputInContext(ctx, inputSelector) {
+  await ctx.waitForSelector(inputSelector, { timeout: 20000 });
 
-  const ok = await page.evaluate((sel) => {
+  const ok = await ctx.evaluate((sel) => {
     const input = document.querySelector(sel);
     if (!input) return false;
 
     const form = input.closest("form");
     if (!form) return false;
 
-    // 1) bouton submit si présent
     const btn = form.querySelector("button[type='submit'], input[type='submit']");
     if (btn) {
       btn.scrollIntoView({ block: "center" });
@@ -83,7 +106,6 @@ async function submitFormOfInput(page, inputSelector) {
       return true;
     }
 
-    // 2) sinon submit() JS
     if (typeof form.submit === "function") {
       form.submit();
       return true;
@@ -100,12 +122,12 @@ async function submitFormOfInput(page, inputSelector) {
 ========================= */
 
 const SEL = {
-  // Login (à adapter si besoin)
+  // LOGIN (à adapter si besoin)
   email: "input[name='email'], input[type='email']",
   password: "input[type='password']",
   loginSubmit: "button[type='submit'], input[type='submit']",
 
-  // Plaque (confirmé)
+  // PLAQUE (confirmé)
   immatInput: "input[name='immat']",
 };
 
@@ -151,7 +173,7 @@ async function loginIfNeeded(page) {
 
   await gotoStable(page, loginUrl);
 
-  // Si déjà connecté, parfois pas de champ password
+  // Si déjà connecté, parfois il n’y a pas de champ password
   const hasPassword = await page.$(SEL.password);
   if (!hasPassword) {
     console.log("Supplier1: already logged-in");
@@ -160,14 +182,17 @@ async function loginIfNeeded(page) {
 
   console.log("Supplier1: performing login");
 
-  await humanDelay();
-  await setInputValue(page, SEL.email, user);
-
-  await humanDelay();
-  await setInputValue(page, SEL.password, pass);
-
+  await page.waitForSelector(SEL.email, { timeout: 20000 });
   await humanDelay();
 
+  // Remplir via JS (évite “not clickable”)
+  await setInputValueInContext(page, SEL.email, user);
+  await humanDelay();
+
+  await setInputValueInContext(page, SEL.password, pass);
+  await humanDelay();
+
+  // Click submit (JS) + navigation si elle existe
   await Promise.allSettled([
     clickFirstVisible(page, SEL.loginSubmit),
     page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }),
@@ -178,25 +203,46 @@ async function loginIfNeeded(page) {
 }
 
 /* =========================
-   PLAQUE
+   PLAQUE (immat) + DEBUG
 ========================= */
 
 async function enterPlate(page, plate) {
+  // Aller sur menu si URL fournie
   if (process.env.SUP_URL_MENU) {
     await gotoStable(page, process.env.SUP_URL_MENU);
   } else {
     await humanDelay();
   }
 
-  console.log("Supplier1: entering plate", plate);
+  console.log("Supplier1: current URL before immat =", page.url());
 
+  // Cherche l’input immat sur la page ou dans les frames
+  const found = await findSelectorInPageOrFrames(page, SEL.immatInput);
+
+  if (!found) {
+    // Debug HTML snippet
+    const html = await page.content();
+    console.log("Supplier1 DEBUG: immat not found. HTML snippet:\n", html.slice(0, 2500));
+
+    // Debug frames
+    const frames = page.frames().map((f) => f.url());
+    console.log("Supplier1 DEBUG: frames urls =", frames);
+
+    throw new Error("immat input not found on page (or frames)");
+  }
+
+  const ctx = found.ctx;
+
+  console.log("Supplier1: immat found in", found.where);
   await humanDelay();
-  await setInputValue(page, SEL.immatInput, plate);
 
+  // Remplir la plaque (JS)
+  await setInputValueInContext(ctx, SEL.immatInput, plate);
   await humanDelay(800, 1600);
 
+  // Submit du form contenant immat (dans le même contexte)
   await Promise.allSettled([
-    submitFormOfInput(page, SEL.immatInput),
+    submitFormOfInputInContext(ctx, SEL.immatInput),
     page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }),
   ]);
 
@@ -214,15 +260,21 @@ async function supplier1Scrape(plate) {
   const browser = await launchBrowser();
   const page = await browser.newPage();
 
+  // Anti-ban léger
   await page.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
   );
   await page.setViewport({ width: 1366, height: 768 });
 
   await loadCookies(page);
+
+  // Login
   await loginIfNeeded(page);
+
+  // Plaque
   await enterPlate(page, plate);
 
+  // À ce stade, on valide seulement que la plaque est passée
   const afterUrl = page.url();
 
   await browser.close();
