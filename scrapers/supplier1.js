@@ -6,7 +6,6 @@ const COOKIE_PATH = "/tmp/supplier1-cookies.json";
 /* =========================
    UTILITAIRES
 ========================= */
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const humanDelay = async (min = 600, max = 1400) => {
@@ -20,25 +19,51 @@ const gotoStable = async (page, url) => {
   await sleep(500);
 };
 
-async function clickFirstVisible(page, selector) {
-  await page.waitForSelector(selector, { timeout: 20000 });
+async function dumpDebug(page, tag) {
+  const safeTag = tag.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const ts = Date.now();
+  const base = `/tmp/${safeTag}-${ts}`;
 
-  const ok = await page.evaluate((sel) => {
-    const els = Array.from(document.querySelectorAll(sel));
-    const el = els.find((e) => {
-      const r = e.getBoundingClientRect();
-      const s = window.getComputedStyle(e);
-      return r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden" && !e.disabled;
-    });
-    if (!el) return false;
-    el.scrollIntoView({ block: "center" });
-    el.click();
-    return true;
-  }, selector);
+  const url = page.url();
+  const title = await page.title().catch(() => "");
+  const html = await page.content().catch(() => "");
 
-  if (!ok) throw new Error(`No visible clickable element for selector: ${selector}`);
+  try {
+    await page.screenshot({ path: `${base}.png`, fullPage: true });
+    console.log("DEBUG screenshot saved:", `${base}.png`);
+  } catch (e) {
+    console.log("DEBUG screenshot failed:", String(e?.message || e));
+  }
+
+  try {
+    fs.writeFileSync(`${base}.html`, html);
+    console.log("DEBUG html saved:", `${base}.html`);
+  } catch (e) {
+    console.log("DEBUG html write failed:", String(e?.message || e));
+  }
+
+  const frames = page.frames().map((f) => f.url());
+
+  console.log("DEBUG url:", url);
+  console.log("DEBUG title:", title);
+  console.log("DEBUG frames:", frames);
+  console.log("DEBUG html snippet:", html.slice(0, 2500));
+
+  const lower = html.toLowerCase();
+  const hints = [];
+  if (lower.includes("cloudflare")) hints.push("cloudflare");
+  if (lower.includes("captcha")) hints.push("captcha");
+  if (lower.includes("access denied")) hints.push("access_denied");
+  if (lower.includes("forbidden")) hints.push("forbidden");
+  if (lower.includes("robot")) hints.push("robot_check");
+  if (hints.length) console.log("DEBUG hints:", hints.join(", "));
 }
 
+/* =========================
+   HELPERS DOM (PAGE/FRAME)
+========================= */
+
+// Cherche un selector sur page ou frames
 async function findSelectorInPageOrFrames(page, selector) {
   try {
     const h = await page.$(selector);
@@ -54,6 +79,7 @@ async function findSelectorInPageOrFrames(page, selector) {
   return null;
 }
 
+// Remplit un input via JS + events (page OU frame)
 async function setInputValueInContext(ctx, selector, value) {
   await ctx.waitForSelector(selector, { timeout: 20000 });
 
@@ -73,6 +99,7 @@ async function setInputValueInContext(ctx, selector, value) {
   if (!ok) throw new Error(`Cannot set value for input: ${selector}`);
 }
 
+// Soumet le form qui contient l’input (page OU frame)
 async function submitFormOfInputInContext(ctx, inputSelector) {
   await ctx.waitForSelector(inputSelector, { timeout: 20000 });
 
@@ -89,77 +116,21 @@ async function submitFormOfInputInContext(ctx, inputSelector) {
       btn.click();
       return true;
     }
+
     if (typeof form.submit === "function") {
       form.submit();
       return true;
     }
+
     return false;
   }, inputSelector);
 
   if (!ok) throw new Error(`Cannot submit form for input: ${inputSelector}`);
 }
 
-// ✅ DEBUG: sauvegarde screenshot + html + infos
-async function dumpDebug(page, tag) {
-  const safeTag = tag.replace(/[^a-zA-Z0-9_-]/g, "_");
-  const ts = Date.now();
-  const base = `/tmp/${safeTag}-${ts}`;
-
-  const url = page.url();
-  const title = await page.title().catch(() => "");
-  const html = await page.content().catch(() => "");
-
-  // screenshot (si possible)
-  try {
-    await page.screenshot({ path: `${base}.png`, fullPage: true });
-    console.log("DEBUG screenshot saved:", `${base}.png`);
-  } catch (e) {
-    console.log("DEBUG screenshot failed:", String(e?.message || e));
-  }
-
-  // html
-  try {
-    fs.writeFileSync(`${base}.html`, html);
-    console.log("DEBUG html saved:", `${base}.html`);
-  } catch (e) {
-    console.log("DEBUG html write failed:", String(e?.message || e));
-  }
-
-  // frames list
-  const frames = page.frames().map((f) => f.url());
-
-  console.log("DEBUG url:", url);
-  console.log("DEBUG title:", title);
-  console.log("DEBUG frames:", frames);
-  console.log("DEBUG html snippet:", html.slice(0, 2000));
-
-  // indices utiles pour anti-bot
-  const lower = html.toLowerCase();
-  const hints = [];
-  if (lower.includes("cloudflare")) hints.push("cloudflare");
-  if (lower.includes("captcha")) hints.push("captcha");
-  if (lower.includes("access denied")) hints.push("access_denied");
-  if (lower.includes("forbidden")) hints.push("forbidden");
-  if (lower.includes("robot")) hints.push("robot_check");
-  if (hints.length) console.log("DEBUG hints:", hints.join(", "));
-}
-
-/* =========================
-   SELECTEURS
-========================= */
-
-const SEL = {
-  email: "input[name='email'], input[type='email']",
-  password: "input[type='password']",
-  loginSubmit: "button[type='submit'], input[type='submit']",
-
-  immatInput: "input[name='immat']",
-};
-
 /* =========================
    COOKIES
 ========================= */
-
 async function launchBrowser() {
   return puppeteer.launch({
     headless: true,
@@ -184,8 +155,57 @@ async function saveCookies(page) {
 }
 
 /* =========================
-   LOGIN
+   LOGIN AUTO-DETECT
 ========================= */
+
+// Trouve automatiquement les champs login/password visibles sur la page
+async function findLoginSelectors(page) {
+  const result = await page.evaluate(() => {
+    const isVisible = (el) => {
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden" && !el.disabled;
+    };
+
+    const inputs = Array.from(document.querySelectorAll("input")).filter(isVisible);
+
+    const password = inputs.find((i) => (i.getAttribute("type") || "").toLowerCase() === "password");
+    const textCandidates = inputs.filter((i) => {
+      const type = (i.getAttribute("type") || "text").toLowerCase();
+      return type === "text" || type === "email" || type === "tel";
+    });
+
+    const pick = (el) => {
+      if (!el) return null;
+      // fabrique un selector robuste
+      const id = el.getAttribute("id");
+      const name = el.getAttribute("name");
+      if (id) return `#${CSS.escape(id)}`;
+      if (name) return `input[name="${name}"]`;
+      return null;
+    };
+
+    return {
+      userSel: pick(textCandidates[0] || null),
+      passSel: pick(password || null),
+      // infos debug utiles
+      allInputNames: inputs.map((i) => ({
+        type: i.getAttribute("type") || "",
+        name: i.getAttribute("name") || "",
+        id: i.getAttribute("id") || "",
+        placeholder: i.getAttribute("placeholder") || "",
+      })),
+    };
+  });
+
+  console.log("Supplier1 DEBUG: visible inputs =", result.allInputNames);
+
+  if (!result.userSel || !result.passSel) {
+    throw new Error("Could not auto-detect login fields (user/password)");
+  }
+
+  return { userSel: result.userSel, passSel: result.passSel };
+}
 
 async function loginIfNeeded(page) {
   const loginUrl = process.env.SUP_URL_LOGIN;
@@ -198,36 +218,52 @@ async function loginIfNeeded(page) {
 
   await gotoStable(page, loginUrl);
 
-  const hasPassword = await page.$(SEL.password);
+  // Si déjà connecté, il est possible qu'il n'y ait aucun password visible
+  const hasPassword = await page.$('input[type="password"]');
   if (!hasPassword) {
     console.log("Supplier1: already logged-in (no password field)");
     return;
   }
 
-  await page.waitForSelector(SEL.email, { timeout: 20000 });
+  console.log("Supplier1: performing login (auto-detect)");
+
+  const { userSel, passSel } = await findLoginSelectors(page);
+
+  await humanDelay();
+  await setInputValueInContext(page, userSel, user);
+
+  await humanDelay();
+  await setInputValueInContext(page, passSel, pass);
+
   await humanDelay();
 
-  await setInputValueInContext(page, SEL.email, user);
-  await humanDelay();
-
-  await setInputValueInContext(page, SEL.password, pass);
-  await humanDelay();
-
+  // Soumet le formulaire du password (le plus fiable)
   await Promise.allSettled([
-    clickFirstVisible(page, SEL.loginSubmit),
-    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }),
+    submitFormOfInputInContext(page, passSel),
+    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }),
   ]);
 
   await humanDelay(1200, 2200);
+
+  // Si on voit encore un password, login probablement échoué
+  const stillPassword = await page.$('input[type="password"]');
+  if (stillPassword) {
+    console.log("Supplier1: login might have failed (still on login page)");
+    await dumpDebug(page, "login_failed");
+    throw new Error("Login failed or still on login page");
+  }
+
   await saveCookies(page);
+  console.log("Supplier1: login OK");
 }
 
 /* =========================
-   PLAQUE
+   PLAQUE (immat)
 ========================= */
+const IMM_SEL = "input[name='immat']";
 
 async function enterPlate(page, plate) {
-  // Si tu as un menu URL fixe, utilise-le
+  // Après login, si tu as une URL menu fixe, mets SUP_URL_MENU.
   if (process.env.SUP_URL_MENU) {
     await gotoStable(page, process.env.SUP_URL_MENU);
   } else {
@@ -236,8 +272,7 @@ async function enterPlate(page, plate) {
 
   console.log("Supplier1: URL before immat:", page.url());
 
-  const found = await findSelectorInPageOrFrames(page, SEL.immatInput);
-
+  const found = await findSelectorInPageOrFrames(page, IMM_SEL);
   if (!found) {
     await dumpDebug(page, "immat_not_found");
     throw new Error("immat input not found on page (or frames)");
@@ -247,12 +282,13 @@ async function enterPlate(page, plate) {
   console.log("Supplier1: immat found in", found.where);
 
   await humanDelay();
-  await setInputValueInContext(ctx, SEL.immatInput, plate);
+  await setInputValueInContext(ctx, IMM_SEL, plate);
+
   await humanDelay(800, 1600);
 
   await Promise.allSettled([
-    submitFormOfInputInContext(ctx, SEL.immatInput),
-    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }),
+    submitFormOfInputInContext(ctx, IMM_SEL),
+    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }),
   ]);
 
   await humanDelay(1200, 2400);
@@ -261,7 +297,6 @@ async function enterPlate(page, plate) {
 /* =========================
    SCRAPER PRINCIPAL
 ========================= */
-
 async function supplier1Scrape(plate) {
   plate = (plate || "").toString().trim();
   if (!plate) throw new Error("Missing plate");
@@ -280,7 +315,6 @@ async function supplier1Scrape(plate) {
     await loginIfNeeded(page);
     await enterPlate(page, plate);
   } catch (e) {
-    // debug général en cas d'erreur
     console.log("Supplier1 ERROR:", String(e?.message || e));
     await dumpDebug(page, "supplier1_error");
     await browser.close();
