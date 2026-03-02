@@ -163,7 +163,7 @@ async function enterPlate(page, plate) {
 }
 
 /* =========================
-   MODELS (OK)
+   MODELS
 ========================= */
 async function extractModels(page) {
   await humanDelay(600, 1200);
@@ -217,16 +217,10 @@ async function pickModel(page, modelToken) {
 }
 
 /* =========================
-   ✅ PARTS / FAMILLES
+   PARTS (planches)
 ========================= */
 async function extractParts(page) {
   await humanDelay(800, 1500);
-
-  // On attend qu'il y ait du contenu interactif
-  await Promise.race([
-    page.waitForSelector("a, button, tr, td", { timeout: 15000 }),
-    sleep(1500),
-  ]);
 
   return await page.evaluate(() => {
     const clean = (t) => (t || "").replace(/<!--[\s\S]*?-->/g, "").replace(/\s+/g, " ").trim();
@@ -246,7 +240,7 @@ async function extractParts(page) {
 
     const out = [];
 
-    // 1) liens href
+    // href
     for (const a of Array.from(document.querySelectorAll("a"))) {
       const label = clean(a.textContent);
       const href = (a.getAttribute("href") || "").trim();
@@ -255,7 +249,7 @@ async function extractParts(page) {
       out.push({ label, partToken: `href:${href}` });
     }
 
-    // 2) boutons/éléments avec onclick (souvent Atelio)
+    // onclick (planches)
     const clickable = Array.from(document.querySelectorAll("[onclick]"))
       .map((el) => ({
         label: clean(el.textContent || el.getAttribute("value") || ""),
@@ -264,35 +258,23 @@ async function extractParts(page) {
       .filter((x) => x.onclick && x.label && !isNoise(x.label));
 
     for (const c of clickable) {
-      // On garde uniquement les onclick qui ressemblent à navigation (évite boutons inutiles)
       const oc = c.onclick.toLowerCase();
-      const ok =
-        oc.includes("choose") ||
-        oc.includes("select") ||
-        oc.includes("affiche") ||
-        oc.includes("goto") ||
-        oc.includes("open") ||
-        oc.includes("detail") ||
-        oc.includes("piece") ||
-        oc.includes("famille");
-      if (!ok) continue;
+      if (!oc.includes("selectionpiece") && !oc.includes("afficheplanche") && !oc.includes("codeplanche")) continue;
       out.push({ label: c.label, partToken: `onclick:${c.onclick}` });
     }
 
-    // dédoublonnage + limite
     const seen = new Set();
     return out
       .filter((x) => {
-        const k = x.partToken;
-        if (seen.has(k)) return false;
-        seen.add(k);
+        if (seen.has(x.partToken)) return false;
+        seen.add(x.partToken);
         return true;
       })
       .slice(0, 200);
   });
 }
 
-async function pickPart(page, partToken) {
+async function pickPlanche(page, partToken) {
   if (partToken.startsWith("href:")) {
     const href = partToken.slice("href:".length);
     await page.evaluate((href) => {
@@ -300,37 +282,125 @@ async function pickPart(page, partToken) {
       if (a) a.click();
       else window.location.href = href;
     }, href);
-
-    await Promise.race([
-      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }),
-      sleep(1500),
-    ]);
-    await humanDelay(800, 1600);
-    return;
-  }
-
-  if (partToken.startsWith("onclick:")) {
+  } else if (partToken.startsWith("onclick:")) {
     const oc = partToken.slice("onclick:".length);
     await page.evaluate((oc) => {
-      // exécute le onclick comme le ferait un click (Atelio utilise des fonctions globales)
       // eslint-disable-next-line no-new-func
       const fn = new Function(oc);
       fn();
     }, oc);
-
-    await Promise.race([
-      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }),
-      sleep(1500),
-    ]);
-    await humanDelay(800, 1600);
-    return;
+  } else {
+    throw new Error("Unknown partToken format");
   }
 
-  throw new Error("Unknown partToken format");
+  await Promise.race([
+    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }),
+    sleep(1800),
+  ]);
+  await humanDelay(800, 1600);
 }
 
 /* =========================
-   REF (on garde simple pour l’instant)
+   PIECES (dans une planche)
+========================= */
+
+// extraction des lignes de pièces : on vise une table, sinon on prend les éléments cliquables
+async function extractPieces(page) {
+  await humanDelay(800, 1500);
+
+  // attends table si possible
+  await Promise.race([
+    page.waitForSelector("table", { timeout: 12000 }),
+    sleep(1200),
+  ]);
+
+  return await page.evaluate(() => {
+    const clean = (t) => (t || "").replace(/<!--[\s\S]*?-->/g, "").replace(/\s+/g, " ").trim();
+
+    // 1) table: on prend les lignes et on cherche un lien/onclick dans la ligne
+    const table = document.querySelector("table");
+    if (table) {
+      const rows = Array.from(table.querySelectorAll("tr")).slice(0, 200);
+      const out = [];
+
+      for (let i = 0; i < rows.length; i++) {
+        const tr = rows[i];
+        const txt = clean(tr.textContent);
+        if (!txt || txt.length < 3) continue;
+
+        const a = tr.querySelector("a");
+        if (a) {
+          const href = (a.getAttribute("href") || "").trim();
+          if (href && href !== "#") {
+            out.push({ label: txt.slice(0, 160), pieceToken: `href:${href}` });
+            continue;
+          }
+        }
+
+        const elOnclick = tr.querySelector("[onclick]");
+        if (elOnclick) {
+          const oc = (elOnclick.getAttribute("onclick") || "").trim();
+          if (oc) {
+            out.push({ label: txt.slice(0, 160), pieceToken: `onclick:${oc}` });
+            continue;
+          }
+        }
+
+        // fallback: ligne cliquable elle-même
+        const ocRow = (tr.getAttribute("onclick") || "").trim();
+        if (ocRow) out.push({ label: txt.slice(0, 160), pieceToken: `onclick:${ocRow}` });
+      }
+
+      // dédoublonnage
+      const seen = new Set();
+      return out.filter((x) => {
+        const k = x.pieceToken;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+    }
+
+    // 2) sans table: éléments onclick
+    const out = Array.from(document.querySelectorAll("[onclick]"))
+      .map((el) => ({
+        label: clean(el.textContent || el.getAttribute("value") || ""),
+        pieceToken: `onclick:${(el.getAttribute("onclick") || "").trim()}`,
+      }))
+      .filter((x) => x.label && x.pieceToken.length > 10);
+
+    return out.slice(0, 200);
+  });
+}
+
+async function pickPiece(page, pieceToken) {
+  if (pieceToken.startsWith("href:")) {
+    const href = pieceToken.slice("href:".length);
+    await page.evaluate((href) => {
+      const a = Array.from(document.querySelectorAll("a")).find((x) => (x.getAttribute("href") || "").trim() === href);
+      if (a) a.click();
+      else window.location.href = href;
+    }, href);
+  } else if (pieceToken.startsWith("onclick:")) {
+    const oc = pieceToken.slice("onclick:".length);
+    await page.evaluate((oc) => {
+      // eslint-disable-next-line no-new-func
+      const fn = new Function(oc);
+      fn();
+    }, oc);
+  } else {
+    throw new Error("Unknown pieceToken format");
+  }
+
+  await Promise.race([
+    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }),
+    sleep(1800),
+  ]);
+  await humanDelay(800, 1600);
+}
+
+/* =========================
+   REF
 ========================= */
 async function extractReference(page) {
   await humanDelay(700, 1400);
@@ -350,7 +420,6 @@ async function extractReference(page) {
       .join(" || ") || text;
 
     const m = hay.match(/\b[A-Z0-9][A-Z0-9\-\.]{5,24}\b/i);
-
     return { candidate: m ? m[0] : "", pageUrl: window.location.href, snippet: hay.slice(0, 260) };
   });
 }
@@ -378,10 +447,8 @@ async function getModelsByPlate(plate) {
     await loginIfNeeded(page);
     if (process.env.SUP_URL_MENU) await gotoStable(page, process.env.SUP_URL_MENU);
     await enterPlate(page, plate);
-
     const models = await extractModels(page);
-    if (!models || models.length === 0) await dumpDebug(page, "models_empty");
-
+    if (!models.length) await dumpDebug(page, "models_empty");
     await browser.close();
     return models;
   } catch (e) {
@@ -397,12 +464,9 @@ async function getPartsByPlateAndModel(plate, modelToken) {
     await loginIfNeeded(page);
     if (process.env.SUP_URL_MENU) await gotoStable(page, process.env.SUP_URL_MENU);
     await enterPlate(page, plate);
-
     await pickModel(page, modelToken);
-
     const parts = await extractParts(page);
-    if (!parts || parts.length === 0) await dumpDebug(page, "parts_empty");
-
+    if (!parts.length) await dumpDebug(page, "parts_empty");
     await browser.close();
     return parts;
   } catch (e) {
@@ -412,18 +476,43 @@ async function getPartsByPlateAndModel(plate, modelToken) {
   }
 }
 
-async function getRefByPlateModelPart(plate, modelToken, partToken) {
+// ✅ NOUVEAU: planche -> pièces
+async function getPiecesByPlateModelPlanche(plate, modelToken, partToken) {
   const { browser, page } = await newBrowserPage();
   try {
     await loginIfNeeded(page);
     if (process.env.SUP_URL_MENU) await gotoStable(page, process.env.SUP_URL_MENU);
-    await enterPlate(page, plate);
 
+    await enterPlate(page, plate);
     await pickModel(page, modelToken);
-    await pickPart(page, partToken);
+    await pickPlanche(page, partToken);
+
+    const pieces = await extractPieces(page);
+    if (!pieces.length) await dumpDebug(page, "pieces_empty");
+
+    await browser.close();
+    return pieces;
+  } catch (e) {
+    await dumpDebug(page, "get_pieces_error");
+    await browser.close();
+    throw e;
+  }
+}
+
+// ✅ NOUVEAU: planche + pièce -> ref
+async function getRefByPlateModelPlanchePiece(plate, modelToken, partToken, pieceToken) {
+  const { browser, page } = await newBrowserPage();
+  try {
+    await loginIfNeeded(page);
+    if (process.env.SUP_URL_MENU) await gotoStable(page, process.env.SUP_URL_MENU);
+
+    await enterPlate(page, plate);
+    await pickModel(page, modelToken);
+    await pickPlanche(page, partToken);
+    await pickPiece(page, pieceToken);
 
     const ref = await extractReference(page);
-    if (!ref || !ref.candidate) await dumpDebug(page, "ref_empty");
+    if (!ref.candidate) await dumpDebug(page, "ref_empty");
 
     await browser.close();
     return ref;
@@ -437,5 +526,6 @@ async function getRefByPlateModelPart(plate, modelToken, partToken) {
 module.exports = {
   getModelsByPlate,
   getPartsByPlateAndModel,
-  getRefByPlateModelPart,
+  getPiecesByPlateModelPlanche,
+  getRefByPlateModelPlanchePiece,
 };
