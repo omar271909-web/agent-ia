@@ -290,7 +290,6 @@ async function ensurePiecesTab(page) {
 async function extractPiecesFromBestTable(page) {
   await humanDelay(700, 1200);
 
-  // expiring vehicle
   const expired = await page.evaluate(() => {
     const t = (document.body?.innerText || "").toLowerCase();
     return t.includes("ce véhicule n'est plus disponible") || t.includes("ce vehicule n'est plus disponible");
@@ -313,96 +312,81 @@ async function extractPiecesFromBestTable(page) {
       if (low.includes("référence") || low.includes("reference")) score += 80;
       if (low.includes("désignation") || low.includes("designation")) score += 50;
       if (low.includes("repère") || low.includes("repere")) score += 30;
-      // malus glossaire
       if (low.includes("glossaire") || low.includes("abréviations") || low.includes("abreviations")) score -= 200;
       return score;
     };
 
     const best = tables.map((t) => ({ t, s: scoreTable(t) })).sort((a, b) => b.s - a.s)[0].t;
     const rows = Array.from(best.querySelectorAll("tr"));
+
     const out = [];
+
+    const skipLine = (s) => {
+      const low = s.toLowerCase();
+      return (
+        low.startsWith("validité") ||
+        low.startsWith("validite") ||
+        low.startsWith("desc.") ||
+        low.includes("desc. technique") ||
+        low.startsWith("couleur") ||
+        low.startsWith("état de livraison") ||
+        low.startsWith("etat de livraison")
+      );
+    };
 
     for (let i = 0; i < rows.length; i++) {
       const tr = rows[i];
-      const txt = clean(tr.textContent);
-      if (!txt || txt.length < 3) continue;
+      const raw = clean(tr.textContent);
+      if (!raw || raw.length < 8) continue;
+      if (skipLine(raw)) continue;
 
-      // filtre glossaire/abréviations (au cas où)
-      const low = txt.toLowerCase();
-      if (low.startsWith("glossaire") || low.includes("abréviations") || low.includes("abreviations")) continue;
-      if (low.includes("ampère") && low.includes("antibrouillard") && txt.length < 60) continue;
+      // Ex: "ANNEAU AV REMORQUAGE511123001R80.05 €"
+      // ou "BAVETTE AILE AV D820121247933.33 €"
+      // On extrait :
+      // - price : 80.05
+      // - ref   : 511123001R (souvent chiffres + lettre R)
+      // - name  : reste du début
+      const mPrice = raw.match(/(\d+[.,]\d{2})\s*€/);
+      const price = mPrice ? Number(mPrice[1].replace(",", ".")) : null;
 
-      const a = tr.querySelector("a[href]");
-      if (a) {
-        const href = (a.getAttribute("href") || "").trim();
-        if (href && href !== "#") {
-          out.push({ label: txt.slice(0, 160), pieceToken: `href:${href}` });
-          continue;
-        }
+      // ref: les refs Renault ressemblent souvent à \d{8,10}R? ou \d{8,10}[A-Z]\d?
+      // On prend un bloc alphanum de 6-15 juste avant le prix si possible
+      let ref = "";
+      if (mPrice) {
+        const before = raw.slice(0, mPrice.index).trim();
+        const mRef = before.match(/([A-Z0-9]{6,18})\s*$/i);
+        if (mRef) ref = mRef[1];
       }
-      out.push({ label: txt.slice(0, 160), pieceToken: `row:${i}` });
+
+      // name: raw sans ref/prix à la fin
+      let name = raw;
+      if (price !== null && ref) {
+        name = raw.replace(ref, "").replace(mPrice[0], "").trim();
+      } else if (price !== null) {
+        name = raw.replace(mPrice[0], "").trim();
+      }
+
+      // token pour cliquer (si tu veux ouvrir le détail)
+      out.push({
+        name,
+        ref,
+        price,
+        currency: "EUR",
+        pieceToken: `row:${i}`
+      });
     }
 
-    // si on est encore sur glossaire, on le verra car aucune ligne “pièce” réaliste
-    const filtered = out.filter((x) => x.label.length > 10);
-
+    // dédoublonnage par ref+name
     const seen = new Set();
-    return filtered
-      .filter((x) => {
-        const k = x.pieceToken;
-        if (seen.has(k)) return false;
-        seen.add(k);
-        return true;
-      })
-      .slice(0, 200);
+    return out.filter((x) => {
+      const k = `${x.ref}|${x.name}|${x.price}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
   });
 
   return { error: null, pieces };
-}
-
-async function pickPiece(page, pieceToken) {
-  if (pieceToken.startsWith("href:")) {
-    const href = pieceToken.slice("href:".length);
-    const abs = href.startsWith("http") ? href : `${BASE}${href.startsWith("/") ? "" : "/"}${href}`;
-    await gotoStable(page, abs);
-    return;
-  }
-
-  if (pieceToken.startsWith("row:")) {
-    const idx = Number(pieceToken.slice("row:".length));
-    await page.evaluate((idx) => {
-      const tables = Array.from(document.querySelectorAll("table"));
-      if (!tables.length) return;
-
-      const clean = (t) => (t || "").replace(/\s+/g, " ").trim();
-      const scoreTable = (table) => {
-        const txt = clean(table.innerText || "");
-        const rows = table.querySelectorAll("tr").length;
-        let score = rows;
-        const low = txt.toLowerCase();
-        if (low.includes("référence") || low.includes("reference")) score += 80;
-        if (low.includes("désignation") || low.includes("designation")) score += 50;
-        if (low.includes("repère") || low.includes("repere")) score += 30;
-        if (low.includes("glossaire") || low.includes("abréviations") || low.includes("abreviations")) score -= 200;
-        return score;
-      };
-
-      const best = tables.map((t) => ({ t, s: scoreTable(t) })).sort((a, b) => b.s - a.s)[0].t;
-      const rows = Array.from(best.querySelectorAll("tr"));
-      const tr = rows[idx];
-      if (!tr) return;
-
-      const a = tr.querySelector("a");
-      if (a) a.click();
-      else tr.click();
-    }, idx);
-
-    await Promise.race([page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }), sleep(1800)]);
-    await humanDelay(800, 1400);
-    return;
-  }
-
-  throw new Error("Unknown pieceToken format");
 }
 
 /* =========================
