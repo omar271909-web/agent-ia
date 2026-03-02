@@ -517,6 +517,67 @@ async function getPiecesByPlateModelPlanche(plate, modelToken, partToken) {
     throw e;
   }
 }
+async function debugPlanche(plate, modelToken, partToken) {
+  const { browser, page } = await newBrowserPage();
+  try {
+    await loginIfNeeded(page);
+    if (process.env.SUP_URL_MENU) await gotoStable(page, process.env.SUP_URL_MENU);
+
+    await enterPlate(page, plate);
+    await pickModel(page, modelToken);
+    await openPlanche(page, partToken);
+
+    // collecte infos
+    const debug = await page.evaluate(() => {
+      const clean = (t) => (t || "").replace(/\s+/g, " ").trim();
+      const text = clean(document.body?.innerText || "");
+      const url = window.location.href;
+
+      const interesting = (s) => {
+        const low = (s || "").toLowerCase();
+        return (
+          low.includes("piece") ||
+          low.includes("pièce") ||
+          low.includes("repere") ||
+          low.includes("repère") ||
+          low.includes("detail") ||
+          low.includes("détail") ||
+          low.includes("liste") ||
+          low.includes("selectionpiece")
+        );
+      };
+
+      const links = Array.from(document.querySelectorAll("a[href]"))
+        .map((a) => a.getAttribute("href"))
+        .filter(Boolean)
+        .map((h) => h.trim())
+        .filter((h) => interesting(h))
+        .slice(0, 80);
+
+      const onclicks = Array.from(document.querySelectorAll("[onclick]"))
+        .map((el) => el.getAttribute("onclick"))
+        .filter(Boolean)
+        .map((oc) => oc.trim())
+        .filter((oc) => interesting(oc))
+        .slice(0, 120);
+
+      const buttons = Array.from(document.querySelectorAll("a,button,input[type='button'],input[type='submit']"))
+        .map((el) => clean(el.textContent || el.value || ""))
+        .filter((t) => t && interesting(t))
+        .slice(0, 80);
+
+      const head = text.slice(0, 500);
+      return { url, head, links, onclicks, buttons };
+    });
+
+    await browser.close();
+    return debug;
+  } catch (e) {
+    await dumpDebug(page, "debug_planche_error");
+    await browser.close();
+    throw e;
+  }
+}
 
 async function getRefByPlateModelPlanchePiece(plate, modelToken, partToken, pieceToken) {
   const { browser, page } = await newBrowserPage();
@@ -551,4 +612,5 @@ module.exports = {
   getPartsByPlateAndModel,
   getPiecesByPlateModelPlanche,
   getRefByPlateModelPlanchePiece,
+  debugPlanche
 };

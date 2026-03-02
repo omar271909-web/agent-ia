@@ -6,14 +6,13 @@ const app = express();
 app.use(express.json());
 
 app.get("/health", (req, res) => res.json({ ok: true }));
-app.get("/version", (req, res) => res.send("atelio-api-v3"));
+app.get("/version", (req, res) => res.send("atelio-api-debug-v1"));
 
 app.get("/atelio/models", async (req, res) => {
   try {
     const plate = String(req.query.plate || "").trim();
     if (!plate) return res.status(400).json({ ok: false, error: "Missing plate" });
-    const models = await atelio.getModelsByPlate(plate);
-    res.json({ ok: true, plate, models });
+    res.json({ ok: true, plate, models: await atelio.getModelsByPlate(plate) });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
@@ -25,8 +24,7 @@ app.get("/atelio/parts", async (req, res) => {
     const modelToken = String(req.query.modelToken || "").trim();
     if (!plate) return res.status(400).json({ ok: false, error: "Missing plate" });
     if (!modelToken) return res.status(400).json({ ok: false, error: "Missing modelToken" });
-    const parts = await atelio.getPartsByPlateAndModel(plate, modelToken);
-    res.json({ ok: true, plate, modelToken, parts });
+    res.json({ ok: true, plate, modelToken, parts: await atelio.getPartsByPlateAndModel(plate, modelToken) });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
@@ -36,31 +34,29 @@ app.get("/atelio/pieces", async (req, res) => {
   try {
     const plate = String(req.query.plate || "").trim();
     const modelToken = String(req.query.modelToken || "").trim();
-    const partToken = String(req.query.partToken || "").trim(); // planche:XXXX
+    const partToken = String(req.query.partToken || "").trim();
     if (!plate) return res.status(400).json({ ok: false, error: "Missing plate" });
     if (!modelToken) return res.status(400).json({ ok: false, error: "Missing modelToken" });
     if (!partToken) return res.status(400).json({ ok: false, error: "Missing partToken" });
 
-    const pieces = await atelio.getPiecesByPlateModelPlanche(plate, modelToken, partToken);
-    res.json({ ok: true, plate, modelToken, partToken, pieces });
+    res.json({ ok: true, plate, modelToken, partToken, pieces: await atelio.getPiecesByPlateModelPlanche(plate, modelToken, partToken) });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
-app.get("/atelio/ref", async (req, res) => {
+// ✅ NOUVEAU DEBUG
+app.get("/atelio/debug-planche", async (req, res) => {
   try {
     const plate = String(req.query.plate || "").trim();
     const modelToken = String(req.query.modelToken || "").trim();
-    const partToken = String(req.query.partToken || "").trim();   // planche:XXXX
-    const pieceToken = String(req.query.pieceToken || "").trim(); // row:N ou href:...
+    const partToken = String(req.query.partToken || "").trim();
     if (!plate) return res.status(400).json({ ok: false, error: "Missing plate" });
     if (!modelToken) return res.status(400).json({ ok: false, error: "Missing modelToken" });
     if (!partToken) return res.status(400).json({ ok: false, error: "Missing partToken" });
-    if (!pieceToken) return res.status(400).json({ ok: false, error: "Missing pieceToken" });
 
-    const ref = await atelio.getRefByPlateModelPlanchePiece(plate, modelToken, partToken, pieceToken);
-    res.json({ ok: true, plate, modelToken, partToken, pieceToken, ref });
+    const debug = await atelio.debugPlanche(plate, modelToken, partToken);
+    res.json({ ok: true, plate, modelToken, partToken, debug });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
