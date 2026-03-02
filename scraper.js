@@ -1,14 +1,17 @@
 const sendToHostinger = require("./sendToHostinger");
 
 async function scrape(plate) {
-  plate = (plate || "").toString().trim();
-  console.log("SCRAPER plate =", plate);
-
   const parts = [
-    { name: "Plaquette frein", price: 49.9, supplier: "Test Supplier", url: "https://example.com" },
+    {
+      name: "TEST_INSERT_OK",
+      price: 12.34,
+      supplier: "RailwayTest",
+      url: "https://example.com"
+    }
   ];
 
-  await sendToHostinger({ plate, parts });
+  const resp = await sendToHostinger({ plate, parts });
+  console.log("Saved to Hostinger:", resp);
 
   return parts;
 }
