@@ -206,11 +206,7 @@ async function pickModel(page, modelToken) {
     if (tr) tr.click();
   }, id);
 
-  await Promise.race([
-    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }),
-    sleep(1800),
-  ]);
-
+  await Promise.race([page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }), sleep(1800)]);
   await humanDelay(800, 1600);
 }
 
@@ -258,65 +254,54 @@ async function openPlanche(page, partToken) {
 }
 
 /**
- * ✅ Si on tombe sur un glossaire / écran info, on essaie de basculer vers “pièces”
+ * ✅ Passe en vue “Pièces” (startSelectionPieces) puis attend une table de pièces
  */
-async function ensurePiecesView(page) {
-  await humanDelay(600, 1000);
-
-  const isGlossary = await page.evaluate(() => {
-    const t = (document.body?.innerText || "").toLowerCase();
-    return t.includes("glossaire") || t.includes("abréviations") || t.includes("abreviations");
-  });
-
-  if (!isGlossary) return;
-
-  // tente de cliquer un onglet/lien contenant ces mots
-  const clicked = await page.evaluate(() => {
-    const wanted = ["pièce", "pieces", "liste", "détail", "detail", "repère", "reperes", "référence", "reference"];
-    const clean = (t) => (t || "").replace(/\s+/g, " ").trim();
-    const candidates = [];
-
-    // liens + boutons
-    for (const el of Array.from(document.querySelectorAll("a, button, input[type='button'], input[type='submit']"))) {
-      const label = clean(el.textContent || el.value || "");
-      if (!label) continue;
-      const low = label.toLowerCase();
-      if (wanted.some((w) => low.includes(w))) candidates.push(el);
+async function ensurePiecesTab(page) {
+  // 1) si la fonction existe, on l'appelle direct
+  const called = await page.evaluate(() => {
+    if (typeof window.startSelectionPieces === "function") {
+      window.startSelectionPieces("X", true);
+      return true;
     }
-
-    if (!candidates.length) return false;
-
-    candidates[0].click();
-    return true;
+    return false;
   });
 
-  if (!clicked) return;
+  if (!called) {
+    // 2) sinon clique le bouton "Pièces"
+    const clicked = await page.evaluate(() => {
+      const clean = (t) => (t || "").replace(/\s+/g, " ").trim().toLowerCase();
+      const els = Array.from(document.querySelectorAll("a,button,input[type='button'],input[type='submit']"));
+      const target = els.find((el) => clean(el.textContent || el.value || "") === "pièces" || clean(el.textContent || el.value || "") === "pieces");
+      if (!target) return false;
+      target.click();
+      return true;
+    });
+    if (!clicked) return;
+  }
 
-  await Promise.race([
-    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }),
-    sleep(1200),
-  ]);
-  await humanDelay(800, 1400);
+  // 3) attendre que le DOM se mette à jour (souvent AJAX)
+  await sleep(800);
+  await humanDelay(600, 1200);
 }
 
 /* =========================
    PIECES
 ========================= */
-async function extractPieces(page) {
-  await humanDelay(800, 1500);
+async function extractPiecesFromBestTable(page) {
+  await humanDelay(700, 1200);
 
-  // véhicule expiré ?
+  // expiring vehicle
   const expired = await page.evaluate(() => {
     const t = (document.body?.innerText || "").toLowerCase();
     return t.includes("ce véhicule n'est plus disponible") || t.includes("ce vehicule n'est plus disponible");
   });
   if (expired) return { error: "VEHICLE_EXPIRED", pieces: [] };
 
-  // au moins une table
   await Promise.race([page.waitForSelector("table", { timeout: 15000 }), sleep(1200)]);
 
   const pieces = await page.evaluate(() => {
     const clean = (t) => (t || "").replace(/<!--[\s\S]*?-->/g, "").replace(/\s+/g, " ").trim();
+
     const tables = Array.from(document.querySelectorAll("table"));
     if (!tables.length) return [];
 
@@ -325,9 +310,11 @@ async function extractPieces(page) {
       const rows = table.querySelectorAll("tr").length;
       let score = rows;
       const low = txt.toLowerCase();
-      if (low.includes("référence") || low.includes("reference")) score += 50;
-      if (low.includes("désignation") || low.includes("designation")) score += 30;
-      if (low.includes("repère") || low.includes("repere")) score += 20;
+      if (low.includes("référence") || low.includes("reference")) score += 80;
+      if (low.includes("désignation") || low.includes("designation")) score += 50;
+      if (low.includes("repère") || low.includes("repere")) score += 30;
+      // malus glossaire
+      if (low.includes("glossaire") || low.includes("abréviations") || low.includes("abreviations")) score -= 200;
       return score;
     };
 
@@ -340,9 +327,10 @@ async function extractPieces(page) {
       const txt = clean(tr.textContent);
       if (!txt || txt.length < 3) continue;
 
-      // ignore lignes typiques glossaire
+      // filtre glossaire/abréviations (au cas où)
       const low = txt.toLowerCase();
       if (low.startsWith("glossaire") || low.includes("abréviations") || low.includes("abreviations")) continue;
+      if (low.includes("ampère") && low.includes("antibrouillard") && txt.length < 60) continue;
 
       const a = tr.querySelector("a[href]");
       if (a) {
@@ -355,6 +343,7 @@ async function extractPieces(page) {
       out.push({ label: txt.slice(0, 160), pieceToken: `row:${i}` });
     }
 
+    // si on est encore sur glossaire, on le verra car aucune ligne “pièce” réaliste
     const filtered = out.filter((x) => x.label.length > 10);
 
     const seen = new Set();
@@ -391,13 +380,14 @@ async function pickPiece(page, pieceToken) {
         const rows = table.querySelectorAll("tr").length;
         let score = rows;
         const low = txt.toLowerCase();
-        if (low.includes("référence") || low.includes("reference")) score += 50;
-        if (low.includes("désignation") || low.includes("designation")) score += 30;
-        if (low.includes("repère") || low.includes("repere")) score += 20;
+        if (low.includes("référence") || low.includes("reference")) score += 80;
+        if (low.includes("désignation") || low.includes("designation")) score += 50;
+        if (low.includes("repère") || low.includes("repere")) score += 30;
+        if (low.includes("glossaire") || low.includes("abréviations") || low.includes("abreviations")) score -= 200;
         return score;
       };
-      const best = tables.map((t) => ({ t, s: scoreTable(t) })).sort((a, b) => b.s - a.s)[0].t;
 
+      const best = tables.map((t) => ({ t, s: scoreTable(t) })).sort((a, b) => b.s - a.s)[0].t;
       const rows = Array.from(best.querySelectorAll("tr"));
       const tr = rows[idx];
       if (!tr) return;
@@ -407,10 +397,7 @@ async function pickPiece(page, pieceToken) {
       else tr.click();
     }, idx);
 
-    await Promise.race([
-      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }),
-      sleep(1800),
-    ]);
+    await Promise.race([page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }), sleep(1800)]);
     await humanDelay(800, 1400);
     return;
   }
@@ -503,11 +490,15 @@ async function getPiecesByPlateModelPlanche(plate, modelToken, partToken) {
     await pickModel(page, modelToken);
     await openPlanche(page, partToken);
 
-    // ✅ force “vue pièces” si glossaire
-    await ensurePiecesView(page);
+    // ✅ clé: onglet Pièces
+    await ensurePiecesTab(page);
 
-    const { error, pieces } = await extractPieces(page);
+    const { error, pieces } = await extractPiecesFromBestTable(page);
     if (error) throw new Error(error);
+
+    // sécurité: si on est encore sur glossaire, dump
+    const looksGlossary = pieces.slice(0, 5).some((p) => /ampère|antibrouillard|abrevi|glossaire/i.test(p.label));
+    if (looksGlossary) await dumpDebug(page, "still_glossary_after_pieces_tab");
 
     await browser.close();
     return pieces;
@@ -517,6 +508,34 @@ async function getPiecesByPlateModelPlanche(plate, modelToken, partToken) {
     throw e;
   }
 }
+
+async function getRefByPlateModelPlanchePiece(plate, modelToken, partToken, pieceToken) {
+  const { browser, page } = await newBrowserPage();
+  try {
+    await loginIfNeeded(page);
+    if (process.env.SUP_URL_MENU) await gotoStable(page, process.env.SUP_URL_MENU);
+
+    await enterPlate(page, plate);
+    await pickModel(page, modelToken);
+    await openPlanche(page, partToken);
+
+    await ensurePiecesTab(page);
+
+    const { error } = await extractPiecesFromBestTable(page);
+    if (error) throw new Error(error);
+
+    await pickPiece(page, pieceToken);
+
+    const ref = await extractReference(page);
+    await browser.close();
+    return ref;
+  } catch (e) {
+    await dumpDebug(page, "get_ref_error");
+    await browser.close();
+    throw e;
+  }
+}
+
 async function debugPlanche(plate, modelToken, partToken) {
   const { browser, page } = await newBrowserPage();
   try {
@@ -527,7 +546,6 @@ async function debugPlanche(plate, modelToken, partToken) {
     await pickModel(page, modelToken);
     await openPlanche(page, partToken);
 
-    // collecte infos
     const debug = await page.evaluate(() => {
       const clean = (t) => (t || "").replace(/\s+/g, " ").trim();
       const text = clean(document.body?.innerText || "");
@@ -535,16 +553,7 @@ async function debugPlanche(plate, modelToken, partToken) {
 
       const interesting = (s) => {
         const low = (s || "").toLowerCase();
-        return (
-          low.includes("piece") ||
-          low.includes("pièce") ||
-          low.includes("repere") ||
-          low.includes("repère") ||
-          low.includes("detail") ||
-          low.includes("détail") ||
-          low.includes("liste") ||
-          low.includes("selectionpiece")
-        );
+        return low.includes("piece") || low.includes("pièce") || low.includes("repere") || low.includes("detail") || low.includes("liste");
       };
 
       const links = Array.from(document.querySelectorAll("a[href]"))
@@ -579,38 +588,10 @@ async function debugPlanche(plate, modelToken, partToken) {
   }
 }
 
-async function getRefByPlateModelPlanchePiece(plate, modelToken, partToken, pieceToken) {
-  const { browser, page } = await newBrowserPage();
-  try {
-    await loginIfNeeded(page);
-    if (process.env.SUP_URL_MENU) await gotoStable(page, process.env.SUP_URL_MENU);
-
-    await enterPlate(page, plate);
-    await pickModel(page, modelToken);
-    await openPlanche(page, partToken);
-
-    await ensurePiecesView(page);
-
-    const { error } = await extractPieces(page);
-    if (error) throw new Error(error);
-
-    await pickPiece(page, pieceToken);
-
-    const ref = await extractReference(page);
-
-    await browser.close();
-    return ref;
-  } catch (e) {
-    await dumpDebug(page, "get_ref_error");
-    await browser.close();
-    throw e;
-  }
-}
-
 module.exports = {
   getModelsByPlate,
   getPartsByPlateAndModel,
   getPiecesByPlateModelPlanche,
   getRefByPlateModelPlanchePiece,
-  debugPlanche
+  debugPlanche,
 };
