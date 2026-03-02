@@ -8,16 +8,18 @@ app.use(express.json());
 
 app.get("/run", async (req, res) => {
   try {
-    const plate = req.query.plate || "";
+    const plate = (req.query.plate || "").toString().trim();
+
+    if (!plate) {
+      return res.status(400).json({ ok: false, error: "Missing plate in query (?plate=...)" });
+    }
+
+    console.log("RUN plate =", plate);
+
     const result = await scrape(plate);
     res.json({ ok: true, plate, result });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: String(e) });
   }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log("Agent IA listening on", PORT);
 });
