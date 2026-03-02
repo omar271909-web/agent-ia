@@ -257,32 +257,69 @@ async function openPlanche(page, partToken) {
   await gotoStable(page, url);
 }
 
+/**
+ * ✅ Si on tombe sur un glossaire / écran info, on essaie de basculer vers “pièces”
+ */
+async function ensurePiecesView(page) {
+  await humanDelay(600, 1000);
+
+  const isGlossary = await page.evaluate(() => {
+    const t = (document.body?.innerText || "").toLowerCase();
+    return t.includes("glossaire") || t.includes("abréviations") || t.includes("abreviations");
+  });
+
+  if (!isGlossary) return;
+
+  // tente de cliquer un onglet/lien contenant ces mots
+  const clicked = await page.evaluate(() => {
+    const wanted = ["pièce", "pieces", "liste", "détail", "detail", "repère", "reperes", "référence", "reference"];
+    const clean = (t) => (t || "").replace(/\s+/g, " ").trim();
+    const candidates = [];
+
+    // liens + boutons
+    for (const el of Array.from(document.querySelectorAll("a, button, input[type='button'], input[type='submit']"))) {
+      const label = clean(el.textContent || el.value || "");
+      if (!label) continue;
+      const low = label.toLowerCase();
+      if (wanted.some((w) => low.includes(w))) candidates.push(el);
+    }
+
+    if (!candidates.length) return false;
+
+    candidates[0].click();
+    return true;
+  });
+
+  if (!clicked) return;
+
+  await Promise.race([
+    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }),
+    sleep(1200),
+  ]);
+  await humanDelay(800, 1400);
+}
+
 /* =========================
-   ✅ PIECES: choisir la bonne table + détecter véhicule expiré
+   PIECES
 ========================= */
 async function extractPieces(page) {
   await humanDelay(800, 1500);
 
+  // véhicule expiré ?
   const expired = await page.evaluate(() => {
     const t = (document.body?.innerText || "").toLowerCase();
     return t.includes("ce véhicule n'est plus disponible") || t.includes("ce vehicule n'est plus disponible");
   });
+  if (expired) return { error: "VEHICLE_EXPIRED", pieces: [] };
 
-  if (expired) {
-    // on dump pour avoir la preuve côté logs
-    return { error: "VEHICLE_EXPIRED", pieces: [] };
-  }
-
-  // attend au moins une table
+  // au moins une table
   await Promise.race([page.waitForSelector("table", { timeout: 15000 }), sleep(1200)]);
 
   const pieces = await page.evaluate(() => {
     const clean = (t) => (t || "").replace(/<!--[\s\S]*?-->/g, "").replace(/\s+/g, " ").trim();
-
     const tables = Array.from(document.querySelectorAll("table"));
     if (!tables.length) return [];
 
-    // Score une table : nb de lignes + présence de mots clés
     const scoreTable = (table) => {
       const txt = clean(table.innerText || "");
       const rows = table.querySelectorAll("tr").length;
@@ -290,15 +327,11 @@ async function extractPieces(page) {
       const low = txt.toLowerCase();
       if (low.includes("référence") || low.includes("reference")) score += 50;
       if (low.includes("désignation") || low.includes("designation")) score += 30;
-      if (low.includes("quantité") || low.includes("quantite")) score += 10;
+      if (low.includes("repère") || low.includes("repere")) score += 20;
       return score;
     };
 
-    // choisir table la plus probable
-    const best = tables
-      .map((t) => ({ t, s: scoreTable(t) }))
-      .sort((a, b) => b.s - a.s)[0].t;
-
+    const best = tables.map((t) => ({ t, s: scoreTable(t) })).sort((a, b) => b.s - a.s)[0].t;
     const rows = Array.from(best.querySelectorAll("tr"));
     const out = [];
 
@@ -307,7 +340,10 @@ async function extractPieces(page) {
       const txt = clean(tr.textContent);
       if (!txt || txt.length < 3) continue;
 
-      // lien direct
+      // ignore lignes typiques glossaire
+      const low = txt.toLowerCase();
+      if (low.startsWith("glossaire") || low.includes("abréviations") || low.includes("abreviations")) continue;
+
       const a = tr.querySelector("a[href]");
       if (a) {
         const href = (a.getAttribute("href") || "").trim();
@@ -316,22 +352,20 @@ async function extractPieces(page) {
           continue;
         }
       }
-
-      // sinon index
       out.push({ label: txt.slice(0, 160), pieceToken: `row:${i}` });
     }
 
-    // filtre un peu les lignes “vides”
-    const filtered = out.filter((x) => x.label.length > 8);
+    const filtered = out.filter((x) => x.label.length > 10);
 
-    // dédoublonnage
     const seen = new Set();
-    return filtered.filter((x) => {
-      const k = x.pieceToken;
-      if (seen.has(k)) return false;
-      seen.add(k);
-      return true;
-    }).slice(0, 200);
+    return filtered
+      .filter((x) => {
+        const k = x.pieceToken;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      })
+      .slice(0, 200);
   });
 
   return { error: null, pieces };
@@ -351,7 +385,6 @@ async function pickPiece(page, pieceToken) {
       const tables = Array.from(document.querySelectorAll("table"));
       if (!tables.length) return;
 
-      // reprend la meilleure table comme extractPieces
       const clean = (t) => (t || "").replace(/\s+/g, " ").trim();
       const scoreTable = (table) => {
         const txt = clean(table.innerText || "");
@@ -360,7 +393,7 @@ async function pickPiece(page, pieceToken) {
         const low = txt.toLowerCase();
         if (low.includes("référence") || low.includes("reference")) score += 50;
         if (low.includes("désignation") || low.includes("designation")) score += 30;
-        if (low.includes("quantité") || low.includes("quantite")) score += 10;
+        if (low.includes("repère") || low.includes("repere")) score += 20;
         return score;
       };
       const best = tables.map((t) => ({ t, s: scoreTable(t) })).sort((a, b) => b.s - a.s)[0].t;
@@ -378,7 +411,7 @@ async function pickPiece(page, pieceToken) {
       page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 25000 }),
       sleep(1800),
     ]);
-    await humanDelay(800, 1600);
+    await humanDelay(800, 1400);
     return;
   }
 
@@ -434,7 +467,6 @@ async function getModelsByPlate(plate) {
     if (process.env.SUP_URL_MENU) await gotoStable(page, process.env.SUP_URL_MENU);
     await enterPlate(page, plate);
     const models = await extractModels(page);
-    if (!models.length) await dumpDebug(page, "models_empty");
     await browser.close();
     return models;
   } catch (e) {
@@ -452,7 +484,6 @@ async function getPartsByPlateAndModel(plate, modelToken) {
     await enterPlate(page, plate);
     await pickModel(page, modelToken);
     const parts = await extractParts(page);
-    if (!parts.length) await dumpDebug(page, "parts_empty");
     await browser.close();
     return parts;
   } catch (e) {
@@ -472,17 +503,12 @@ async function getPiecesByPlateModelPlanche(plate, modelToken, partToken) {
     await pickModel(page, modelToken);
     await openPlanche(page, partToken);
 
-    const { error, pieces } = await extractPieces(page);
-    if (error) {
-      await dumpDebug(page, "vehicle_expired");
-      await browser.close();
-      // on renvoie une erreur claire côté API
-      const err = new Error(error);
-      err.code = error;
-      throw err;
-    }
+    // ✅ force “vue pièces” si glossaire
+    await ensurePiecesView(page);
 
-    if (!pieces.length) await dumpDebug(page, "pieces_empty");
+    const { error, pieces } = await extractPieces(page);
+    if (error) throw new Error(error);
+
     await browser.close();
     return pieces;
   } catch (e) {
@@ -502,19 +528,14 @@ async function getRefByPlateModelPlanchePiece(plate, modelToken, partToken, piec
     await pickModel(page, modelToken);
     await openPlanche(page, partToken);
 
+    await ensurePiecesView(page);
+
     const { error } = await extractPieces(page);
-    if (error) {
-      await dumpDebug(page, "vehicle_expired");
-      await browser.close();
-      const err = new Error(error);
-      err.code = error;
-      throw err;
-    }
+    if (error) throw new Error(error);
 
     await pickPiece(page, pieceToken);
 
     const ref = await extractReference(page);
-    if (!ref.candidate) await dumpDebug(page, "ref_empty");
 
     await browser.close();
     return ref;
