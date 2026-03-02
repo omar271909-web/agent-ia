@@ -1,45 +1,60 @@
 const express = require("express");
 require("dotenv").config();
 
-const scrape = require("./scraper");
+const atelio = require("./scrapers/atelio");
 
 const app = express();
 app.use(express.json());
 
-app.get("/", (req, res) => res.status(200).send("OK"));
-app.get("/health", (req, res) => res.json({ ok: true, status: "healthy" }));
+app.get("/", (req, res) => res.send("OK"));
+app.get("/health", (req, res) => res.json({ ok: true }));
 
-// ✅ Mode PRO: répond tout de suite (évite le timeout Railway)
-app.get("/run", (req, res) => {
-  const plate = (req.query.plate || "").toString().trim();
-  if (!plate) return res.status(400).json({ ok: false, error: "Missing plate (?plate=...)" });
+// Pour vérifier que Railway a bien déployé ce code
+app.get("/version", (req, res) => res.send("atelio-api-v1"));
 
-  // fire-and-forget
-  setImmediate(async () => {
-    try {
-      console.log("ASYNC RUN plate =", plate);
-      await scrape(plate);
-      console.log("ASYNC RUN done =", plate);
-    } catch (e) {
-      console.error("ASYNC RUN error:", e);
-    }
-  });
+app.get("/atelio/models", async (req, res) => {
+  try {
+    const plate = String(req.query.plate || "").trim();
+    if (!plate) return res.status(400).json({ ok: false, error: "Missing plate" });
 
-  return res.json({ ok: true, started: true, plate });
+    const models = await atelio.getModelsByPlate(plate);
+    return res.json({ ok: true, plate, models });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
 });
 
-// (Optionnel) Mode debug: attend la fin (risque timeout si long)
-app.get("/run-sync", async (req, res) => {
+app.get("/atelio/parts", async (req, res) => {
   try {
-    const plate = (req.query.plate || "").toString().trim();
-    if (!plate) return res.status(400).json({ ok: false, error: "Missing plate (?plate=...)" });
+    const plate = String(req.query.plate || "").trim();
+    const modelToken = String(req.query.modelToken || "").trim();
+    if (!plate) return res.status(400).json({ ok: false, error: "Missing plate" });
+    if (!modelToken) return res.status(400).json({ ok: false, error: "Missing modelToken" });
 
-    console.log("SYNC RUN plate =", plate);
-    const result = await scrape(plate);
-    res.json({ ok: true, plate, result });
+    const parts = await atelio.getPartsByPlateAndModel(plate, modelToken);
+    return res.json({ ok: true, plate, modelToken, parts });
   } catch (e) {
-    console.error("SYNC RUN error:", e);
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    console.error(e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.get("/atelio/ref", async (req, res) => {
+  try {
+    const plate = String(req.query.plate || "").trim();
+    const modelToken = String(req.query.modelToken || "").trim();
+    const partToken = String(req.query.partToken || "").trim();
+
+    if (!plate) return res.status(400).json({ ok: false, error: "Missing plate" });
+    if (!modelToken) return res.status(400).json({ ok: false, error: "Missing modelToken" });
+    if (!partToken) return res.status(400).json({ ok: false, error: "Missing partToken" });
+
+    const ref = await atelio.getRefByPlateModelPart(plate, modelToken, partToken);
+    return res.json({ ok: true, plate, modelToken, partToken, ref });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
