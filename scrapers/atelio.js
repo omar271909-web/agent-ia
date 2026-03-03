@@ -573,7 +573,6 @@ async function debugPlanche(plate, modelToken, partToken) {
 }
 
 module.exports = {
-  // ✅ Fonctions "core" réutilisées par les endpoints session
   loginIfNeeded,
   gotoStable,
   enterPlate,
@@ -583,13 +582,4 @@ module.exports = {
   openPlanche,
   ensurePiecesTab,
   extractPiecesFromBestTable,
-  extractReference,
-  pickPiece,
-
-  // ✅ (optionnel) tu peux garder tes anciennes fonctions si tu en avais
-  // getModelsByPlate,
-  // getPartsByPlateAndModel,
-  // getPiecesByPlateModelPlanche,
-  // getRefByPlateModelPlanchePiece,
-  // debugPlanche,
 };

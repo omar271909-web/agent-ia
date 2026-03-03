@@ -5,33 +5,26 @@ const atelio = require("./scrapers/atelio");
 const atelioSess = require("./scrapers/atelioSession");
 
 const app = express();
+app.use(express.json());
+
 // ✅ CORS complet + preflight
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Access-Control-Max-Age", "86400"); // cache preflight 24h
+  res.setHeader("Access-Control-Max-Age", "86400");
   if (req.method === "OPTIONS") return res.sendStatus(204);
-  next();
-});
-app.use(express.json());
-
-// ✅ CORS pour que Hostinger (navigateur) puisse appeler Railway
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   next();
 });
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 app.get("/version", (req, res) => res.send("atelio-session-api-v1"));
 
+// DEBUG utile
+console.log("Atelio exports:", Object.keys(atelio));
+
 /**
- * ✅ STEP 1 : START
- * - crée une session puppeteer
- * - login 1 fois
- * - entre la plaque
- * - renvoie models + sessionId
+ * STEP 1 : START
  */
 app.get("/atelio/start", async (req, res) => {
   try {
@@ -54,10 +47,7 @@ app.get("/atelio/start", async (req, res) => {
 });
 
 /**
- * ✅ STEP 2 : PARTS
- * - réutilise la même session
- * - choisit le modèle
- * - renvoie les planches
+ * STEP 2 : PARTS
  */
 app.get("/atelio/parts2", async (req, res) => {
   try {
@@ -78,11 +68,7 @@ app.get("/atelio/parts2", async (req, res) => {
 });
 
 /**
- * ✅ STEP 3 : PIECES
- * - réutilise la même session
- * - ouvre planche
- * - clique onglet "Pièces"
- * - renvoie la liste des pièces avec ref/prix
+ * STEP 3 : PIECES
  */
 app.get("/atelio/pieces2", async (req, res) => {
   try {
@@ -106,35 +92,7 @@ app.get("/atelio/pieces2", async (req, res) => {
 });
 
 /**
- * ✅ (OPTIONNEL) STEP 4 : REF DETAIL
- * Si un jour tu veux cliquer une pièce et ouvrir le détail pour lire une référence exacte ailleurs.
- */
-app.get("/atelio/ref2", async (req, res) => {
-  try {
-    const sessionId = String(req.query.sessionId || "").trim();
-    const partToken = String(req.query.partToken || "").trim();
-    const pieceToken = String(req.query.pieceToken || "").trim();
-    if (!sessionId) return res.status(400).json({ ok: false, error: "Missing sessionId" });
-    if (!partToken) return res.status(400).json({ ok: false, error: "Missing partToken" });
-    if (!pieceToken) return res.status(400).json({ ok: false, error: "Missing pieceToken" });
-
-    const { page } = atelioSess.getSession(sessionId);
-
-    await atelio.openPlanche(page, partToken);
-    await atelio.ensurePiecesTab(page);
-
-    // clique la pièce puis lit la référence
-    await atelio.pickPiece(page, pieceToken);
-    const ref = await atelio.extractReference(page);
-
-    res.json({ ok: true, sessionId, partToken, pieceToken, ref });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
-/**
- * ✅ CLOSE : libérer ressources (recommandé à la fin du tunnel)
+ * CLOSE
  */
 app.get("/atelio/close", async (req, res) => {
   try {
